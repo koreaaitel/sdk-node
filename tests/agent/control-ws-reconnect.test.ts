@@ -294,6 +294,15 @@ describe('ControlWebSocket transfer during the reconnect window', () => {
     return ws;
   }
 
+  it('params that cannot be serialized stay a TypeError, not a connection error', async () => {
+    client = withFakeSocket(() => {});
+
+    const err = await outcome(client.requestTransfer('CA1', { context: { big: 1n } }), 500);
+
+    expect(err).toBeInstanceOf(TypeError);
+    expect(pendingCount(client)).toBe(0);
+  });
+
   it('a send that throws becomes the same error, with nothing pending', async () => {
     client = withFakeSocket(() => {
       throw new Error('boom');

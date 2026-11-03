@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.58.1 (2026-11-03)
 
 ### Fixed
 - **control 연결이 다시 붙는 사이에 전환하면 요청이 조용히 버려지고 `timeout`+10초 뒤에야 `transfer timeout` 으로 실패하던 문제.**

@@ -213,6 +213,9 @@ export class ControlWebSocket {
     if (!ws || ws.readyState !== 1 /* OPEN */) {
       throw new AgentConnectionError(TRANSFER_NO_CONNECTION_MESSAGE);
     }
+    // Before the wait and outside the try below: params the caller cannot serialize (BigInt, a
+    // cycle in `context`) are the caller's TypeError, not a connection problem.
+    const message = JSON.stringify({ event: 'call.transfer', callId, transfer: params });
 
     return new Promise((resolve, reject) => {
       const timeout = ((params.timeout as number) || 30) + 10;
@@ -238,7 +241,7 @@ export class ControlWebSocket {
 
       // Not this.send(): it drops the message silently when the socket is not open.
       try {
-        ws.send(JSON.stringify({ event: 'call.transfer', callId, transfer: params }), (err) => {
+        ws.send(message, (err) => {
           if (err) failSend(err);
         });
       } catch (err) {
