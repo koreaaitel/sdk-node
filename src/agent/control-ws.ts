@@ -5,7 +5,7 @@
 import type { WebSocket as WsType } from 'ws';
 import type { Logger } from 'pino';
 import { NOOP_LOGGER } from './logger.js';
-import { AgentAuthRejectedError } from '../error.js';
+import { AgentAuthRejectedError, AgentConnectionError } from '../error.js';
 
 export interface ControlWsOptions {
   baseUrl: string;
@@ -74,6 +74,9 @@ const NON_RETRYABLE_CLOSE_CODES = new Set<number>([CLOSE_REPLACED, CLOSE_OWNERSH
  * Transient failures (429 reconnect throttle, 5xx, network) still reconnect.
  */
 const REJECTED_HANDSHAKE_STATUSES = new Set<number>([400, 401, 403]);
+
+/** Same wording as the Python SDK. */
+const TRANSFER_NO_CONNECTION_MESSAGE = 'transfer 불가: control 연결이 끊겨 있다(재연결 중이거나 연결이 종료됐다)';
 
 function rejectionMessage(status: number, code: string | null, accountId: string, number?: string): string {
   switch (code) {
@@ -197,8 +200,20 @@ export class ControlWebSocket {
     return this._rejected;
   }
 
-  /** Request a call transfer and wait for the result. */
+  /**
+   * Request a call transfer and wait for the result.
+   *
+   * Rejects with `AgentConnectionError` before anything starts waiting when there is no open
+   * connection. After a drop this object stays alive and reconnecting for a second or more, so the
+   * agent's own `_controlWs` check does not cover that window. It does not wait for the reconnect:
+   * a transfer moves a customer who is on the line now, and nobody knows when the connection returns.
+   */
   async requestTransfer(callId: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const ws = this._ws;
+    if (!ws || ws.readyState !== 1 /* OPEN */) {
+      throw new AgentConnectionError(TRANSFER_NO_CONNECTION_MESSAGE);
+    }
+
     return new Promise((resolve, reject) => {
       const timeout = ((params.timeout as number) || 30) + 10;
       const timer = setTimeout(() => {
@@ -206,16 +221,29 @@ export class ControlWebSocket {
         reject(new Error('transfer timeout'));
       }, timeout * 1000);
 
-      this._transferResolvers.set(callId, {
-        resolve: (value) => { clearTimeout(timer); resolve(value); },
-        reject: (reason) => { clearTimeout(timer); reject(reason); },
-      });
+      const pending = {
+        resolve: (value: Record<string, unknown>) => { clearTimeout(timer); resolve(value); },
+        reject: (reason: Error) => { clearTimeout(timer); reject(reason); },
+      };
+      this._transferResolvers.set(callId, pending);
 
-      this.send({
-        event: 'call.transfer',
-        callId,
-        transfer: params,
-      });
+      // The socket died between the check above and this write: the server never got the request.
+      const failSend = (err: unknown): void => {
+        if (this._transferResolvers.get(callId) === pending) {
+          this._transferResolvers.delete(callId);
+        }
+        this._log.warn({ err }, 'Control WS transfer send failed: %s', callId);
+        pending.reject(new AgentConnectionError(TRANSFER_NO_CONNECTION_MESSAGE));
+      };
+
+      // Not this.send(): it drops the message silently when the socket is not open.
+      try {
+        ws.send(JSON.stringify({ event: 'call.transfer', callId, transfer: params }), (err) => {
+          if (err) failSend(err);
+        });
+      } catch (err) {
+        failSend(err);
+      }
     });
   }
 

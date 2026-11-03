@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer, type WebSocket as WsType } from 'ws';
 import { ControlWebSocket, CLOSE_REPLACED, CLOSE_OWNERSHIP_LOST } from '../../src/agent/control-ws.js';
 import type { ControlWsOptions } from '../../src/agent/control-ws.js';
+import { AgentConnectionError, AgentError } from '../../src/error.js';
 
 /**
  * Reconnection is not a detail here — it decides whether a rolling deploy is seamless or an outage.
@@ -194,5 +195,126 @@ describe('ControlWebSocket lame duck', () => {
     expect(client.lameDuck).toBe(true);
     // Closing here would lose the terminal events of calls still in progress.
     expect(harness.accepted[0]!.readyState).toBe(1);
+  });
+});
+
+/**
+ * A 1001 leaves the object alive and reconnecting for a second or more, so the agent's own
+ * `_controlWs` check does not cover this window. `send()` used to drop the request silently, and
+ * the transfer then waited timeout+10 seconds for an answer the server could never give — while the
+ * customer sat on the line. Measured against origin/main: 11001ms for `timeout: 1`, 0 messages.
+ */
+describe('ControlWebSocket transfer during the reconnect window', () => {
+  let harness: Harness | null = null;
+  let client: ControlWebSocket | null = null;
+
+  afterEach(async () => {
+    client?.close();
+    client = null;
+    await harness?.close();
+    harness = null;
+  });
+
+  const pendingCount = (ws: ControlWebSocket): number =>
+    (ws as unknown as { _transferResolvers: Map<string, unknown> })._transferResolvers.size;
+
+  const isOpen = (ws: ControlWebSocket): boolean =>
+    (ws as unknown as { _ws: WsType | null })._ws?.readyState === 1;
+
+  async function waitFor(condition: () => boolean, what: string): Promise<void> {
+    for (let i = 0; i < 500; i++) {
+      if (condition()) return;
+      await settle(10);
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  }
+
+  /** How the transfer settled, or 'still waiting' if it outlives the deadline. */
+  async function outcome(transfer: Promise<unknown>, deadlineMs: number): Promise<unknown> {
+    transfer.catch(() => {});
+    return Promise.race([
+      transfer.then(
+        (value) => value,
+        (err: unknown) => err,
+      ),
+      settle(deadlineMs).then(() => 'still waiting'),
+    ]);
+  }
+
+  it('fails at once with AgentConnectionError, leaves nothing pending, and works after reconnecting', async () => {
+    harness = await startServer();
+    client = connect(harness);
+    await client.connect();
+    await client.waitConnected();
+    await waitFor(() => harness!.accepted.length === 1, 'the first connection');
+
+    harness.accepted[0]!.close(1001, 'gateway draining');
+    await waitFor(() => !isOpen(client!), 'the client to see the close');
+    expect(harness.accepted).toHaveLength(1); // still inside the window
+
+    const err = await outcome(client.requestTransfer('CA1', { to: '01011112222', timeout: 1 }), 500);
+
+    expect(err).toBeInstanceOf(AgentConnectionError);
+    expect(err).toBeInstanceOf(AgentError);
+    expect((err as Error).message).toContain('transfer 불가');
+    expect(pendingCount(client)).toBe(0);
+
+    // The failure did not damage the connection: the same object transfers again once it is back.
+    await waitFor(() => harness!.accepted.length === 2 && isOpen(client!), 'the reconnect');
+    const received: Record<string, unknown>[] = [];
+    harness.accepted[1]!.on('message', (data) => {
+      const msg = JSON.parse(data.toString()) as Record<string, unknown>;
+      received.push(msg);
+      harness!.accepted[1]!.send(
+        JSON.stringify({ event: 'call.transfer.completed', callId: msg.callId, transfer: { status: 'completed' } }),
+      );
+    });
+
+    const result = await outcome(client.requestTransfer('CA1', { to: '01011112222', timeout: 1 }), 1000);
+
+    expect(result).toEqual({ status: 'completed' });
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({ event: 'call.transfer', callId: 'CA1' });
+    expect(pendingCount(client)).toBe(0);
+  });
+
+  it('never connected: fails the same way', async () => {
+    client = new ControlWebSocket({ baseUrl: 'http://127.0.0.1:1', apiKey: 'key', accountId: 'AC1' });
+
+    const err = await outcome(client.requestTransfer('CA1', { to: '01011112222' }), 500);
+
+    expect(err).toBeInstanceOf(AgentConnectionError);
+    expect(pendingCount(client)).toBe(0);
+  });
+
+  // The socket can die between the check and the write. ws reports that two ways.
+  function withFakeSocket(send: (data: string, cb: (err?: Error) => void) => void): ControlWebSocket {
+    const ws = new ControlWebSocket({ baseUrl: 'http://127.0.0.1:1', apiKey: 'key', accountId: 'AC1' });
+    (ws as unknown as { _ws: unknown })._ws = { readyState: 1, send, close: () => {} };
+    return ws;
+  }
+
+  it('a send that throws becomes the same error, with nothing pending', async () => {
+    client = withFakeSocket(() => {
+      throw new Error('boom');
+    });
+
+    const err = await outcome(client.requestTransfer('CA1', { to: '01011112222' }), 500);
+
+    expect(err).toBeInstanceOf(AgentConnectionError);
+    expect((err as Error).message).toContain('transfer 불가');
+    expect(pendingCount(client)).toBe(0);
+  });
+
+  it('a send that fails in its callback becomes the same error, with nothing pending', async () => {
+    client = withFakeSocket((_data, cb) => {
+      setTimeout(() => cb(new Error('EPIPE')), 0);
+    });
+
+    const err = await outcome(client.requestTransfer('CA1', { to: '01011112222' }), 500);
+
+    expect(err).toBeInstanceOf(AgentConnectionError);
+    expect((err as Error).message).toContain('transfer 불가');
+    expect(pendingCount(client)).toBe(0);
   });
 });
