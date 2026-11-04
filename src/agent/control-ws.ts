@@ -2,6 +2,7 @@
  * Control WebSocket for agent signaling (call.incoming, call.ended, etc.).
  */
 
+import { randomUUID } from 'node:crypto';
 import type { WebSocket as WsType } from 'ws';
 import type { Logger } from 'pino';
 import { NOOP_LOGGER } from './logger.js';
@@ -75,6 +76,21 @@ const NON_RETRYABLE_CLOSE_CODES = new Set<number>([CLOSE_REPLACED, CLOSE_OWNERSH
  */
 const REJECTED_HANDSHAKE_STATUSES = new Set<number>([400, 401, 403]);
 
+/**
+ * Upper bound on waiting for a transfer result — a safeguard, not part of the normal path. The
+ * server owns the wait for the target (`timeout`) and always sends a result; with
+ * `afterTransfer: 'return'` the result only comes when the bridged conversation ends, however long
+ * that takes. Same value as the Python SDK, which learned this from an outage: a bound tied to the
+ * ring timeout cancelled the wait in the middle of a live bridge.
+ */
+const TRANSFER_RESULT_MAX_WAIT_MS = 7_200_000;
+
+/**
+ * Grace between `call.ended` and giving up on a transfer result. The server relays the two as
+ * independent requests, so `call.ended` can arrive first.
+ */
+const TRANSFER_LATE_ARRIVAL_GRACE_MS = 2_000;
+
 /** Same wording as the Python SDK. */
 const TRANSFER_NO_CONNECTION_MESSAGE = 'transfer 불가: control 연결이 끊겨 있다(재연결 중이거나 연결이 종료됐다)';
 
@@ -125,10 +141,17 @@ export class ControlWebSocket {
   private _url: string;
   private _ws: WsType | null = null;
   private _handlers: Map<string, ControlEventHandler[]> = new Map();
+  /**
+   * Keyed by `requestId`, not `callId`: `afterTransfer: 'return'` comes back to the agent and can
+   * transfer again on the same call, and a second wait must not overwrite the first.
+   */
   private _transferResolvers = new Map<string, {
+    callId: string;
     resolve: (value: Record<string, unknown>) => void;
     reject: (reason: Error) => void;
   }>();
+  private _transferCleanupTimers = new Set<ReturnType<typeof setTimeout>>();
+  private _connectionLostWaiters = new Set<() => void>();
   private _reconnectDelay = INITIAL_RECONNECT_DELAY;
   private _closed = false;
   private _connectedResolve: (() => void) | null = null;
@@ -215,26 +238,38 @@ export class ControlWebSocket {
     }
     // Before the wait and outside the try below: params the caller cannot serialize (BigInt, a
     // cycle in `context`) are the caller's TypeError, not a connection problem.
-    const message = JSON.stringify({ event: 'call.transfer', callId, transfer: params });
+    const requestId = randomUUID().replace(/-/g, '');
+    const message = JSON.stringify({
+      event: 'call.transfer',
+      callId,
+      // The server does not interpret this; it echoes it on the result events.
+      transfer: { ...params, requestId },
+    });
 
     return new Promise((resolve, reject) => {
-      const timeout = ((params.timeout as number) || 30) + 10;
       const timer = setTimeout(() => {
-        this._transferResolvers.delete(callId);
+        this._transferResolvers.delete(requestId);
+        this._log.error(
+          'No transfer result within %d ms: call=%s request=%s — the server broke its contract',
+          TRANSFER_RESULT_MAX_WAIT_MS,
+          callId,
+          requestId,
+        );
         reject(new Error('transfer timeout'));
-      }, timeout * 1000);
+      }, TRANSFER_RESULT_MAX_WAIT_MS);
+      // A safeguard this long must not keep a finished process alive.
+      timer.unref?.();
 
       const pending = {
+        callId,
         resolve: (value: Record<string, unknown>) => { clearTimeout(timer); resolve(value); },
         reject: (reason: Error) => { clearTimeout(timer); reject(reason); },
       };
-      this._transferResolvers.set(callId, pending);
+      this._transferResolvers.set(requestId, pending);
 
       // The socket died between the check above and this write: the server never got the request.
       const failSend = (err: unknown): void => {
-        if (this._transferResolvers.get(callId) === pending) {
-          this._transferResolvers.delete(callId);
-        }
+        this._transferResolvers.delete(requestId);
         this._log.warn({ err }, 'Control WS transfer send failed: %s', callId);
         pending.reject(new AgentConnectionError(TRANSFER_NO_CONNECTION_MESSAGE));
       };
@@ -250,6 +285,55 @@ export class ControlWebSocket {
     });
   }
 
+  /**
+   * Resolves when the current connection drops — at once if there is none. Result events are not
+   * resent, so after this a pending transfer result may never come. `cancel` drops the wait.
+   */
+  connectionLost(): { promise: Promise<void>; cancel: () => void } {
+    if (!this._ws || this._ws.readyState !== 1 /* OPEN */) {
+      return { promise: Promise.resolve(), cancel: () => {} };
+    }
+    let waiter!: () => void;
+    const promise = new Promise<void>((resolve) => { waiter = resolve; });
+    this._connectionLostWaiters.add(waiter);
+    return { promise, cancel: () => { this._connectionLostWaiters.delete(waiter); } };
+  }
+
+  private _fireConnectionLost(): void {
+    for (const waiter of this._connectionLostWaiters) waiter();
+    this._connectionLostWaiters.clear();
+  }
+
+  /**
+   * Which request a result event answers. The server echoes `requestId`; without it (an older
+   * server) fall back to `callId`, only when that call has exactly one wait.
+   */
+  private _resolveTransferRequest(event: Record<string, unknown>): string | null {
+    const requestId = event.requestId;
+    if (typeof requestId === 'string' && requestId) {
+      return this._transferResolvers.has(requestId) ? requestId : null;
+    }
+    const waiting = [...this._transferResolvers].filter(([, r]) => r.callId === event.callId);
+    return waiting.length === 1 ? waiting[0]![0] : null;
+  }
+
+  /** After `call.ended` no result is coming: release the wait so the caller does not hang. */
+  private _scheduleTransferCleanup(callId: string): void {
+    const waiting = [...this._transferResolvers].filter(([, r]) => r.callId === callId);
+    if (waiting.length === 0) return;
+    const timer = setTimeout(() => {
+      this._transferCleanupTimers.delete(timer);
+      for (const [requestId, resolver] of waiting) {
+        if (this._transferResolvers.delete(requestId)) {
+          this._log.warn('Call ended without a transfer result: call=%s request=%s', callId, requestId);
+          resolver.resolve({ status: 'canceled' });
+        }
+      }
+    }, TRANSFER_LATE_ARRIVAL_GRACE_MS);
+    timer.unref?.();
+    this._transferCleanupTimers.add(timer);
+  }
+
   /** Send a JSON message over the control WebSocket. */
   send(message: Record<string, unknown>): void {
     if (this._ws && this._ws.readyState === 1 /* OPEN */) {
@@ -261,6 +345,9 @@ export class ControlWebSocket {
   close(): void {
     this._closed = true;
     this._clearPingTimer();
+    this._fireConnectionLost();
+    for (const timer of this._transferCleanupTimers) clearTimeout(timer);
+    this._transferCleanupTimers.clear();
     for (const [, resolver] of this._transferResolvers) {
       resolver.reject(new Error('connection closed'));
     }
@@ -344,6 +431,7 @@ export class ControlWebSocket {
 
     ws.on('close', (code: number, reason: Buffer | string) => {
       this._clearPingTimer();
+      this._fireConnectionLost();
       if (this._closed) return;
 
       if (NON_RETRYABLE_CLOSE_CODES.has(code)) {
@@ -378,12 +466,15 @@ export class ControlWebSocket {
 
     // Resolve pending transfer promises on terminal transfer events
     if (['call.transfer.completed', 'call.transfer.failed'].includes(event.event)) {
-      const callId = event.callId as string;
-      const resolver = this._transferResolvers.get(callId);
-      if (resolver) {
-        this._transferResolvers.delete(callId);
+      const requestId = this._resolveTransferRequest(event);
+      const resolver = requestId ? this._transferResolvers.get(requestId) : undefined;
+      if (requestId && resolver) {
+        this._transferResolvers.delete(requestId);
         resolver.resolve((event.transfer as Record<string, unknown>) || {});
       }
+    }
+    if (event.event === 'call.ended') {
+      this._scheduleTransferCleanup(event.callId as string);
     }
 
     const handlers = this._handlers.get(event.event);

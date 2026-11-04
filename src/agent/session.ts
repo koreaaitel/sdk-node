@@ -83,6 +83,8 @@ export class CallSession {
   private _hangupFn: HangupFn | null = null;
   /** @internal */ _sendDtmfFn: SendDtmfFn | null = null;
   /** @internal */ _transferFn: TransferFn | null = null;
+  /** @internal control 연결이 끊기면 풀리는 대기. 전환 결과를 기다리는 도구가 쓴다. */
+  _transferConnectionLost: (() => { promise: Promise<void>; cancel: () => void }) | null = null;
   /** @internal */ _isTransportConnected: (() => boolean) | null = null;
   /**
    * @internal Media WS playout 마커 훅. LiveKit(`ClawOpsAudioOutput`)이 재생 완료

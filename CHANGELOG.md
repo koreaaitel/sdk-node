@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.59.0 (2026-11-04)
+
+Python SDK 0.73.0 과 같은 변경입니다.
+
+### Changed
+- **동작 변경: LiveKit 세션의 내장 도구 `transfer_call` 이 `after_transfer: "return"` 이면 전환 결과를 돌려줍니다.** 전환이 끝날 때까지 기다렸다가 `{"status": ..., "message": ...}` 를 모델에 줍니다. 종전에는 `transfer_initiated` 를 바로 돌려줘, 대상이 받지 않아도 모델이 그 사실을 몰랐습니다. control 연결이 끊겨 결과를 알 수 없으면 `status` 가 `unknown` 입니다. `terminate` 와 자체 realtime 세션은 그대로입니다.
+
+### Fixed
+- **연결된 상담이 `timeout`+10초를 넘으면 `call.transfer()` 가 `transfer timeout` 으로 실패하던 문제.** 전환이 끝날 때까지 기다립니다. 결과 없이 통화가 끝나면 `{ status: "canceled" }` 를 돌려줍니다. 결과 이벤트는 재전송되지 않으므로 control 연결이 끊긴 틈에 결과가 나면 통화가 끝날 때까지 기다립니다. Python SDK 와 같은 동작입니다.
+- **같은 통화에서 전환을 다시 하면 앞선 `call.transfer()` 가 끝나지 않던 문제.** 요청마다 `requestId` 로 결과를 구분합니다.
+
 ## 0.58.1 (2026-11-03)
 
 ### Fixed

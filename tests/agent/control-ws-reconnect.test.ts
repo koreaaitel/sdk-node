@@ -327,3 +327,83 @@ describe('ControlWebSocket transfer during the reconnect window', () => {
     expect(pendingCount(client)).toBe(0);
   });
 });
+
+describe('transfer result wait', () => {
+  let harness: Harness | null = null;
+  let client: ControlWebSocket | null = null;
+
+  afterEach(async () => {
+    client?.close();
+    client = null;
+    await harness?.close();
+    harness = null;
+  });
+
+  async function connected(): Promise<{ server: WsType; requests: Record<string, any>[] }> {
+    harness = await startServer();
+    client = connect(harness);
+    await client.connect();
+    await settle(20);
+    const server = harness.accepted[0]!;
+    const requests: Record<string, any>[] = [];
+    server.on('message', (data) => requests.push(JSON.parse(data.toString())));
+    return { server, requests };
+  }
+
+  it('second transfer on a call does not overwrite the first wait', async () => {
+    const { server, requests } = await connected();
+    const first = client!.requestTransfer('CA1', { to: 'a', timeout: 1 });
+    const second = client!.requestTransfer('CA1', { to: 'b', timeout: 1 });
+    await settle(20);
+    const [a, b] = requests.map((r) => r.transfer.requestId as string);
+    expect(a).toBeTruthy();
+    expect(a).not.toBe(b);
+
+    server.send(JSON.stringify({ event: 'call.transfer.failed', callId: 'CA1', requestId: a, transfer: { status: 'busy' } }));
+    server.send(JSON.stringify({ event: 'call.transfer.failed', callId: 'CA1', requestId: b, transfer: { status: 'no-answer' } }));
+
+    await expect(first).resolves.toEqual({ status: 'busy' });
+    await expect(second).resolves.toEqual({ status: 'no-answer' });
+  });
+
+  it('keeps waiting past the ring timeout — the bridge decides how long this takes', async () => {
+    const { server, requests } = await connected();
+    let settled = false;
+    const wait = client!.requestTransfer('CA1', { to: 'a', timeout: 0.01 }).finally(() => {
+      settled = true;
+    });
+    await settle(50);
+    expect(settled).toBe(false);
+    server.send(JSON.stringify({
+      event: 'call.transfer.completed',
+      callId: 'CA1',
+      requestId: requests[0]!.transfer.requestId,
+      transfer: { status: 'completed' },
+    }));
+    await expect(wait).resolves.toEqual({ status: 'completed' });
+  });
+
+  it('an older server without requestId still resolves the single wait', async () => {
+    const { server } = await connected();
+    const wait = client!.requestTransfer('CA1', { to: 'a' });
+    await settle(20);
+    server.send(JSON.stringify({ event: 'call.transfer.failed', callId: 'CA1', transfer: { status: 'busy' } }));
+    await expect(wait).resolves.toEqual({ status: 'busy' });
+  });
+
+  it('connectionLost fires when the socket drops, and at once without one', async () => {
+    const { server } = await connected();
+    const { promise } = client!.connectionLost();
+    server.terminate();
+    await expect(promise).resolves.toBeUndefined();
+    client!.close();
+    await expect(client!.connectionLost().promise).resolves.toBeUndefined();
+  });
+
+  it('call.ended without a result releases the wait', async () => {
+    const { server } = await connected();
+    const wait = client!.requestTransfer('CA1', { to: 'a' });
+    server.send(JSON.stringify({ event: 'call.ended', callId: 'CA1' }));
+    await expect(wait).resolves.toEqual({ status: 'canceled' });
+  });
+});

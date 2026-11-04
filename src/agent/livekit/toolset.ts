@@ -11,11 +11,44 @@
  */
 
 import type { BuiltinTool } from '../builtin-tool.js';
-import { getBuiltinToolSchemas, executeBuiltinTool } from '../pipeline/builtin-tool-schemas.js';
+import {
+  getBuiltinToolSchemas,
+  executeBuiltinTool,
+  transferOptionsFromArgs,
+} from '../pipeline/builtin-tool-schemas.js';
+import { CALL_OVER, waitForTransferResult } from '../transfer-tool.js';
 import type { CallSession } from '../session.js';
 
 /** 인사말 도중 모델이 통화를 끊거나 전환하는 사고를 막는다 (ToolFlag.IGNORE_ON_ENTER). */
 const IGNORE_ON_ENTER_TOOLS = new Set(['hang_up', 'transfer_call']);
+
+/**
+ * 결과를 기다리는 전환 중 끼어들기가 일어나면 이어받을 때 할 말이 사라진다. 도구가 끝나면
+ * 되돌린다 — 이어받는 발화는 끊을 수 있어야 한다.
+ */
+async function transferAndWait(
+  args: Record<string, unknown>,
+  call: CallSession,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx?: any,
+): Promise<string> {
+  const speech = ctx?.speechHandle;
+  const allowedBefore = speech?.allowInterruptions;
+  if (speech) ctx.disallowInterruptions?.();
+  try {
+    const transfer = call.transfer(args['to'] as string, transferOptionsFromArgs(args));
+    const lost = call._transferConnectionLost?.();
+    try {
+      return await waitForTransferResult(transfer, lost?.promise);
+    } finally {
+      lost?.cancel();
+    }
+  } catch (e) {
+    return `Error: ${e instanceof Error ? e.message : String(e)}`;
+  } finally {
+    if (allowedBefore) speech.allowInterruptions = true;
+  }
+}
 
 export interface ClawOpsPhoneTools {
   /** LiveKit Toolset 인스턴스 — `agent.updateTools([...])` 에 넣는 ToolContextEntry. */
@@ -30,11 +63,12 @@ export interface ClawOpsPhoneTools {
  * @param llm  동적 로드한 `@livekit/agents` 의 `llm` 네임스페이스 (`tool`/`Toolset`/`ToolFlag`).
  * @param options.enabled       활성화할 내장 도구 (`ClawOpsAgent(builtinTools=...)` 와 동일).
  * @param options.excludeNames  유저/registry 도구와 이름이 겹쳐 제외할 내장 도구 이름.
+ * @param options.StopResponse  `@livekit/agents` 의 `voice.StopResponse`. 끝난 통화에 응답을 안 만들 때 쓴다.
  */
 export function createClawOpsPhoneTools(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   llm: any,
-  options: { enabled: Set<BuiltinTool>; excludeNames?: Set<string> },
+  options: { enabled: Set<BuiltinTool>; excludeNames?: Set<string>; StopResponse?: unknown },
 ): ClawOpsPhoneTools {
   const state: { call: CallSession | null } = { call: null };
   const requireCall = (): CallSession => {
@@ -63,8 +97,18 @@ export function createClawOpsPhoneTools(
         parameters, // raw JSON schema (agents-js 가 JSONSchema7 을 그대로 받는다).
         flags: IGNORE_ON_ENTER_TOOLS.has(name) ? ignoreFlag : undefined,
         // raw schema tool 의 execute 는 파싱된 args 를 그대로 받는다.
-        execute: async (args: Record<string, unknown>) =>
-          (await executeBuiltinTool(name, args ?? {}, requireCall())) ?? '',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        execute: async (args: Record<string, unknown>, opts?: { ctx?: any }) => {
+          if (name === 'transfer_call' && args?.['after_transfer'] === 'return') {
+            const result = await transferAndWait(args, requireCall(), opts?.ctx);
+            // 고객이 끊었다 — 들을 사람이 없으니 모델 응답을 만들지 않는다.
+            if (result === CALL_OVER && typeof options.StopResponse === 'function') {
+              throw new (options.StopResponse as new () => Error)();
+            }
+            return result;
+          }
+          return (await executeBuiltinTool(name, args ?? {}, requireCall())) ?? '';
+        },
       }),
     );
   }
