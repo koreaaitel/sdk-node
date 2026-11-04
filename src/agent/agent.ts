@@ -1459,6 +1459,8 @@ export class ClawOpsAgent {
           }
           return controlWs.requestTransfer(session.callId, params);
         };
+        session._transferConnectionLost = () =>
+          this._controlWs?.connectionLost() ?? { promise: Promise.resolve(), cancel: () => {} };
 
         // Media WS mark/flush 를 세션에 노출 — LiveKit ClawOpsAudioOutput 이 재생 완료
         // (mark echo) 판정과 barge-in 절단 위치 계산에 쓴다. native 세션은 읽지 않는다.

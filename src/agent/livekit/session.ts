@@ -58,6 +58,7 @@ export class LiveKitSession implements Session {
   // 동적 로드한 agents-js 네임스페이스 (boot 시 캐시).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _llm: any = null;
+  private _StopResponse: unknown = undefined;
 
   constructor(create: LiveKitCreateFn, private readonly options: { mediaProfile?: MediaProfile } = {}) {
     mediaContract(options.mediaProfile ?? MediaProfile.MULAW_8000);
@@ -138,10 +139,11 @@ export class LiveKitSession implements Session {
 
     // agents import 와 IO 로드는 독립적이라 병렬로 (boot 1회, 이후 loadClawOpsIO 는 캐시).
     const [agents, io] = await Promise.all([
-      import('@livekit/agents') as Promise<{ llm: unknown }>,
+      import('@livekit/agents') as Promise<{ llm: unknown; voice?: { StopResponse?: unknown } }>,
       loadClawOpsIO(),
     ]);
     this._llm = (agents as { llm: unknown }).llm;
+    this._StopResponse = (agents as { voice?: { StopResponse?: unknown } }).voice?.StopResponse;
     const { ClawOpsAudioInput, ClawOpsAudioOutput } = io;
 
     const target: CallSession | BufferingCall = call ?? new BufferingCall();
@@ -201,7 +203,11 @@ export class LiveKitSession implements Session {
     const bridged = this._bridgeRegistry(this._toolRegistry, taken);
 
     const enabled = this._builtinTools ?? new Set<BuiltinTool>();
-    this._phone = createClawOpsPhoneTools(llm, { enabled, excludeNames: taken });
+    this._phone = createClawOpsPhoneTools(llm, {
+      enabled,
+      excludeNames: taken,
+      StopResponse: this._StopResponse,
+    });
     this._phone.setCall(call);
 
     // ⚠️ sortedToolEntries 는 `[name, tool]` 쌍을 준다. updateTools/ToolContext 는 bare

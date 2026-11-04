@@ -72,6 +72,19 @@ const TRANSFER_CALL = {
   },
 } as const;
 
+/** `transfer_call` 도구 인자 → `call.transfer()` 옵션. */
+export function transferOptionsFromArgs(args: Record<string, unknown>) {
+  return {
+    destinationType: (args['destination_type'] as 'pstn' | 'sip') ?? undefined,
+    mode: (args['mode'] as 'blind' | 'warm') ?? undefined,
+    afterTransfer: (args['after_transfer'] as 'terminate' | 'return') ?? undefined,
+    whisper: args['whisper'] as string ?? undefined,
+    callerId: args['caller_id'] as string ?? undefined,
+    callerIdMode: (args['caller_id_mode'] as 'account' | 'original') ?? undefined,
+    timeout: args['timeout'] as number ?? undefined,
+  };
+}
+
 type NeutralSchema = typeof HANG_UP | typeof COLLECT_DTMF | typeof SEND_DTMF | typeof TRANSFER_CALL;
 
 const TOOL_MAP = new Map<BuiltinTool, NeutralSchema>([
@@ -194,13 +207,7 @@ export async function executeBuiltinTool(
       // call-engine이 transfer 시작 시 media WS를 닫으므로,
       // 결과를 await하면 LLM 세션이 먼저 종료된다.
       call.transfer(args['to'] as string, {
-        destinationType: (args['destination_type'] as 'pstn' | 'sip') ?? undefined,
-        mode: (args['mode'] as 'blind' | 'warm') ?? undefined,
-        afterTransfer: (args['after_transfer'] as 'terminate' | 'return') ?? undefined,
-        whisper: args['whisper'] as string ?? undefined,
-        callerId: args['caller_id'] as string ?? undefined,
-        callerIdMode: (args['caller_id_mode'] as 'account' | 'original') ?? undefined,
-        timeout: args['timeout'] as number ?? undefined,
+        ...transferOptionsFromArgs(args),
         // 결과를 안 기다리므로 실패가 통째로 조용하다 — 모델은 "시작됨" 을 받고, 예외는
         // 프로미스 안에 갇힌다. 최소한 로그에는 남긴다.
       }).catch((e: unknown) => {
