@@ -55,6 +55,17 @@ const TERMINAL_FRAME_GRACE_MS = 2000;
 const INCOMING_SCREEN_DEADLINE_MS = 5000;
 
 /**
+ * `IncomingCall.transfer()` — AI 없이 받아 곧바로 넘기는 통화.
+ * 서버는 미디어 WS 가 붙은 뒤 통화를 받는다. 받은 뒤에야 발신자 음성이 흐르므로 첫 프레임을 신호로 쓴다.
+ */
+const TRANSFER_ONLY_ANSWER_WAIT_MS = 10_000;
+/** 받기와 전환 가능 상태 등록 사이의 짧은 틈에 걸린 거절(NO_SESSION)을 다시 시도하는 기간·간격. */
+const TRANSFER_ONLY_RETRY_MS = 5_000;
+const TRANSFER_ONLY_RETRY_INTERVAL_MS = 200;
+/** 서버의 NO_SESSION 거절 사유(call-engine transfer-handler `_assertMediaSession`). */
+const NO_MEDIA_SESSION_REASON = 'No active media session';
+
+/**
  * How long `drain()` waits for in-flight calls before cutting them. **Unbounded by default.**
  *
  * This used to be 120s — a number that came from the ECS `stopTimeout` ceiling and was then
@@ -948,6 +959,7 @@ export class ClawOpsAgent {
       callerIdRestricted: event['callerIdRestricted'] === true,
       forwardedFrom: readForwardedFrom(event),
       logger: this._log,
+      onDecide: () => decide?.(),
       onReject: (reason: IncomingRejectReason) => {
         // reason 은 반드시 싣는다 — 없으면 서버는 대체 경로로 넘긴다.
         this._log.info('Incoming call rejected: %s -> %s (%s, reason=%s)', fromNumber, toNumber, callId, reason);
@@ -955,6 +967,10 @@ export class ClawOpsAgent {
       },
     });
 
+    let decide: (() => void) | undefined;
+    const decided = new Promise<'decided'>((resolve) => {
+      decide = () => resolve('decided');
+    });
     const slot = { ended: false };
     this._screening.set(callId, slot);
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -973,6 +989,8 @@ export class ClawOpsAgent {
         new Promise<'timeout'>((resolve) => {
           timer = setTimeout(() => resolve('timeout'), this._incomingDeadlineMs);
         }),
+        // transfer() 는 그 자리에서 결정이다 — 선별 함수가 뒤에 더 일해도 기다리지 않는다.
+        decided,
       ]);
       if (outcome === 'timeout') {
         this._log.warn(
@@ -993,7 +1011,153 @@ export class ClawOpsAgent {
       this._log.info('Incoming call ended during screening: %s', callId);
       return;
     }
+    const transfer = call.transferRequest;
+    if (transfer) {
+      this._acceptForTransfer(event, transfer);
+      return;
+    }
     this._acceptIncoming(event);
+  }
+
+  /**
+   * `IncomingCall.transfer()` — AI 세션 없이 받아서 곧바로 넘긴다.
+   *
+   * Session 은 만들지 않고 통화 이벤트(`call_start` 등)도 없다. 서버의 `call.ended` 가 상태를
+   * 채울 수 있게 `_activeSessions` 에만 올린다.
+   */
+  private _acceptForTransfer(event: ControlEvent, transfer: Record<string, unknown>): void {
+    const callId = event['callId'] as string;
+    const fromNumber = (event['from'] as string) ?? '';
+    const mediaUrl = (event['mediaUrl'] as string) ?? '';
+    const session = new CallSession({
+      callId,
+      fromNumber,
+      toNumber: this._fromNumber,
+      accountId: this._accountId,
+      direction: 'inbound',
+      callerIdRestricted: event['callerIdRestricted'] === true,
+      forwardedFrom: readForwardedFrom(event),
+    });
+    session.setLogger(this._log);
+    this._activeSessions.set(callId, session);
+    this._log.info('Incoming call → transfer without AI: %s -> %s (%s)', fromNumber, transfer['to'], callId);
+    this._controlWs?.send({ event: 'call.accept', callId });
+    void this._runTransferOnly(callId, mediaUrl, transfer)
+      .catch((err: unknown) => this._log.error({ err, callId }, 'transfer-only 통화 처리 실패'))
+      .finally(() => this._activeSessions.delete(callId));
+  }
+
+  /**
+   * 미디어만 붙이고, 서버가 통화를 받으면(발신자 음성이 흐르면) 전환을 요청한다.
+   *
+   * 서버는 미디어 WS 가 붙은 **뒤에** 통화를 받고 전환 가능한 상태(mediaSession)를 만든다. 그 전의
+   * 전환은 `No active media session` 으로 거절되므로 첫 음성 프레임을 기다리고, 그래도 거절되면
+   * 짧게 다시 시도한다.
+   *
+   * 요청이 나간 뒤에는 SDK 가 통화를 끊지 않는다 — 전환·실패 안내·종료는 서버 몫이고, 끝나면 서버가
+   * 미디어를 닫는다. SDK 가 끊는 경우는 둘뿐이다: 요청을 아예 보내지 못했을 때, 그리고 시작 전
+   * 거절(사유가 있는 failed: 번호 오류 등)이라 서버가 통화를 그대로 두었을 때. 그동안
+   * `_activeSessions` 에 남아 있으므로 drain 은 이 통화가 끝나기를 기다린다.
+   */
+  private async _runTransferOnly(callId: string, mediaUrl: string, transfer: Record<string, unknown>): Promise<void> {
+    const mediaWs = new MediaWebSocket();
+    mediaWs.setLogger(this._log);
+    let mediaClosed = false;
+    let answered = false;
+    let wake: (() => void) | null = null;
+    const signal = () => {
+      const w = wake;
+      wake = null;
+      w?.();
+    };
+    mediaWs.onAudio(() => {
+      if (!answered) {
+        answered = true;
+        signal();
+      }
+    });
+    const closed = new Promise<'closed'>((resolve) => {
+      mediaWs.onClose(() => {
+        mediaClosed = true;
+        signal();
+        resolve('closed');
+      });
+    });
+
+    let hangUp = false;
+    try {
+      // 연결 전 오류에서 connect() 가 끝나지 않을 수 있어 close 와 함께 기다린다.
+      try {
+        await Promise.race([mediaWs.connect(mediaUrl), closed]);
+      } catch (err) {
+        this._log.error({ err, callId }, 'transfer-only: 미디어 연결 실패');
+        return;
+      }
+
+      if (!answered && !mediaClosed) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          timer = setTimeout(resolve, TRANSFER_ONLY_ANSWER_WAIT_MS);
+        });
+        if (timer) clearTimeout(timer);
+      }
+      if (mediaClosed) {
+        this._log.info('transfer-only: 전환 전에 미디어가 닫혔다(발신자가 끊음 등): %s', callId);
+        return;
+      }
+      if (!answered) {
+        this._log.warn('transfer-only: 발신자 음성이 오지 않았다 — 그대로 전환을 시도한다: %s', callId);
+      }
+
+      const deadline = Date.now() + TRANSFER_ONLY_RETRY_MS;
+      for (;;) {
+        const controlWs = this._controlWs;
+        if (!controlWs) {
+          this._log.error('transfer-only: control 연결이 없다 — 통화를 끊는다: %s', callId);
+          hangUp = true;
+          return;
+        }
+        const req = controlWs.requestTransfer(callId, transfer).then(
+          (result) => ({ kind: 'result' as const, result }),
+          (err: unknown) => ({ kind: 'error' as const, err }),
+        );
+        const first = await Promise.race([req, closed]);
+        if (first === 'closed') {
+          // 서버가 미디어를 닫았다 = 전환이 시작돼 AI 자리가 빠졌거나 통화가 끝났다. 남은 일은 서버 몫이다.
+          this._log.info('transfer-only: 미디어 종료 — 전환은 서버가 이어간다: %s', callId);
+          return;
+        }
+        if (first.kind === 'error') {
+          if (first.err instanceof AgentConnectionError) {
+            this._log.error({ err: first.err, callId }, 'transfer-only: 전환 요청을 보내지 못했다 — 통화를 끊는다');
+            hangUp = true;
+            return;
+          }
+          // 요청은 나갔는데 control 연결이 끊겨 결과를 못 받았다(drain·재연결). 서버 쪽 전환은 계속된다.
+          this._log.warn({ err: first.err, callId }, 'transfer-only: 전환 결과를 받지 못했다 — 서버가 끝내기를 기다린다');
+          break;
+        }
+        const result = first.result;
+        const reason = String(result['reason'] ?? '');
+        if (result['status'] === 'failed' && reason.includes(NO_MEDIA_SESSION_REASON) && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, TRANSFER_ONLY_RETRY_INTERVAL_MS));
+          continue;
+        }
+        this._log.info({ callId, result }, 'transfer-only: 전환 결과');
+        if (result['status'] === 'failed' && reason) {
+          // 시작도 못 한 거절(번호 오류·발신번호 거절 등) — 서버는 통화를 그대로 둔다. 무음으로 남기지 않는다.
+          hangUp = true;
+          return;
+        }
+        break;
+      }
+      // 서버가 끝내고 미디어를 닫을 때까지 기다린다(실패 안내 재생 포함). 우리가 먼저 닫지 않는다.
+      await closed;
+    } finally {
+      // 미디어 WS 를 닫으면 서버가 발신자 채널을 끊는다.
+      if (hangUp && !mediaClosed) mediaWs.close();
+    }
   }
 
   private _acceptIncoming(event: ControlEvent): void {

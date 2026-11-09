@@ -55,6 +55,60 @@ export class DtmfCollectorBusyError extends Error {
   }
 }
 
+/** `CallSession.transfer` 의 옵션. */
+export interface TransferOptions {
+  destinationType?: 'pstn' | 'sip';
+  mode?: 'blind' | 'warm';
+  afterTransfer?: 'terminate' | 'return';
+  holdMedia?: string;
+  whisper?: string;
+  context?: Record<string, unknown>;
+  callerId?: string;
+  callerIdMode?: 'account' | 'original';
+  timeout?: number;
+  /**
+   * 전환이 연결되지 않았을 때(무응답·통화중·대상 실패) **발신자에게** 들려주고 끊을 문장.
+   * 주지 않으면 종전대로 아무 말 없이 끊긴다.
+   *
+   * ⚠️ `afterTransfer: 'return'` 에서는 재생되지 않는다 — 그 모드는 에이전트가 통화를
+   * 이어받으므로 무엇을 말할지는 당신 코드가 정한다. 다만 이어받을 채널이 사라져
+   * 서버가 `terminate` 로 내려앉힌 통화에서는 재생된다(그게 발신자가 무음에 남는 경우다).
+   */
+  failureMessage?: string;
+  /** 위 문장을 읽을 음성. `<Say voice>` 와 같은 표기(`cartesia:<id>`). 생략하면 기본 음성. */
+  failureVoice?: string;
+}
+
+/**
+ * `call.transfer` 요청 본문을 만든다. `CallSession.transfer` 와 `IncomingCall.transfer` 가 함께 쓴다.
+ * @internal
+ */
+export function buildTransferPayload(to: string, options?: TransferOptions): Record<string, unknown> {
+  // 서버는 'original' 만 특별 취급하고 나머지 값은 조용히 무시한다. 오타를 그대로
+  // 흘려보내면 아무 에러 없이 계정 번호가 나가고, 개발자는 켰다고 믿는다 — 여기서 막는다.
+  const callerIdMode = options?.callerIdMode;
+  if (callerIdMode !== undefined && callerIdMode !== 'account' && callerIdMode !== 'original') {
+    throw new Error(`callerIdMode must be 'account' or 'original', got ${JSON.stringify(callerIdMode)}`);
+  }
+  return {
+    to,
+    destinationType: options?.destinationType ?? 'pstn',
+    mode: options?.mode ?? 'blind',
+    afterTransfer: options?.afterTransfer ?? 'terminate',
+    holdMedia: options?.holdMedia ?? 'ringback',
+    whisper: options?.whisper ?? null,
+    context: options?.context ?? null,
+    callerId: options?.callerId ?? null,
+    timeout: options?.timeout ?? 30,
+    // 안 주면 키를 붙이지 않는다 — 구 서버와 기존 동작을 그대로 둔다(additive).
+    ...(callerIdMode !== undefined ? { callerIdMode } : {}),
+    // 같은 이유로 안 주면 키 자체를 안 붙인다. 빈 문자열도 보내지 않는다 — 서버가 빈 문장을
+    // 합성하러 가지 않게 하는 것은 서버 쪽에서도 막지만, 굳이 왕복시킬 이유가 없다.
+    ...(options?.failureMessage ? { failureMessage: options.failureMessage } : {}),
+    ...(options?.failureVoice ? { failureVoice: options.failureVoice } : {}),
+  };
+}
+
 export class CallSession {
   readonly callId: string;
   readonly fromNumber: string;
@@ -425,59 +479,11 @@ export class CallSession {
    * KCT 직결 인입 통화의 발신자)를 벗어나면 전환 자체가 실패한다. 둘 다 주면 `callerId` 가
    * 이기고 `callerIdMode` 는 무시된다 — 우선순위 판단은 서버가 한다.
    */
-  async transfer(
-    to: string,
-    options?: {
-      destinationType?: 'pstn' | 'sip';
-      mode?: 'blind' | 'warm';
-      afterTransfer?: 'terminate' | 'return';
-      holdMedia?: string;
-      whisper?: string;
-      context?: Record<string, unknown>;
-      callerId?: string;
-      callerIdMode?: 'account' | 'original';
-      timeout?: number;
-      /**
-       * 전환이 연결되지 않았을 때(무응답·통화중·대상 실패) **발신자에게** 들려주고 끊을 문장.
-       * 주지 않으면 종전대로 아무 말 없이 끊긴다.
-       *
-       * ⚠️ `afterTransfer: 'return'` 에서는 재생되지 않는다 — 그 모드는 에이전트가 통화를
-       * 이어받으므로 무엇을 말할지는 당신 코드가 정한다. 다만 이어받을 채널이 사라져
-       * 서버가 `terminate` 로 내려앉힌 통화에서는 재생된다(그게 발신자가 무음에 남는 경우다).
-       */
-      failureMessage?: string;
-      /** 위 문장을 읽을 음성. `<Say voice>` 와 같은 표기(`cartesia:<id>`). 생략하면 기본 음성. */
-      failureVoice?: string;
-    },
-  ): Promise<Record<string, unknown>> {
+  async transfer(to: string, options?: TransferOptions): Promise<Record<string, unknown>> {
     if (!this._transferFn) {
       throw new Error('transfer not available');
     }
-    // 서버는 'original' 만 특별 취급하고 나머지 값은 조용히 무시한다. 오타를 그대로
-    // 흘려보내면 아무 에러 없이 계정 번호가 나가고, 개발자는 켰다고 믿는다 — 여기서 막는다.
-    const callerIdMode = options?.callerIdMode;
-    if (callerIdMode !== undefined && callerIdMode !== 'account' && callerIdMode !== 'original') {
-      throw new Error(
-        `callerIdMode must be 'account' or 'original', got ${JSON.stringify(callerIdMode)}`,
-      );
-    }
-    return this._transferFn({
-      to,
-      destinationType: options?.destinationType ?? 'pstn',
-      mode: options?.mode ?? 'blind',
-      afterTransfer: options?.afterTransfer ?? 'terminate',
-      holdMedia: options?.holdMedia ?? 'ringback',
-      whisper: options?.whisper ?? null,
-      context: options?.context ?? null,
-      callerId: options?.callerId ?? null,
-      timeout: options?.timeout ?? 30,
-      // 안 주면 키를 붙이지 않는다 — 구 서버와 기존 동작을 그대로 둔다(additive).
-      ...(callerIdMode !== undefined ? { callerIdMode } : {}),
-      // 같은 이유로 안 주면 키 자체를 안 붙인다. 빈 문자열도 보내지 않는다 — 서버가 빈 문장을
-      // 합성하러 가지 않게 하는 것은 서버 쪽에서도 막지만, 굳이 왕복시킬 이유가 없다.
-      ...(options?.failureMessage ? { failureMessage: options.failureMessage } : {}),
-      ...(options?.failureVoice ? { failureVoice: options.failureVoice } : {}),
-    });
+    return this._transferFn(buildTransferPayload(to, options));
   }
 
   /** Register an event handler. */
