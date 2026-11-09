@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.60.0 (2026-11-09)
+
+Python SDK 0.74.0 과 같은 변경입니다.
+
+### Added
+- **`IncomingCall.transfer(to, opts?)` — `onIncoming` 에서 AI 없이 받아 바로 넘깁니다.** AI 세션을 시작하지 않으므로 첫 인사·모델 연결이 없고, 발신자는 연결음을 듣습니다. 통화가 연결되면 곧바로 전환합니다. 옵션은 `call.transfer()` 와 같고 `mode: 'blind'`·`afterTransfer: 'terminate'` 로 고정됩니다. 지정한 발신자만 AI 가 받고 나머지는 상담 번호로 보낼 때 씁니다. 이 통화에는 `call_start`/`call_end` 등 이벤트가 없습니다.
+
 ## 0.59.0 (2026-11-04)
 
 Python SDK 0.73.0 과 같은 변경입니다.

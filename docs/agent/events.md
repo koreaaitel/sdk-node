@@ -48,9 +48,9 @@ agent.on('call_failed', async (call, reason) => {
 > `reason` 값은 `call.endedStatus` 와 동일합니다. 자세한 의미는
 > [발신 결과 확인하기](quickstart.md#발신-결과-확인하기) 를 참고하세요.
 
-## 수신 통화 거절 — `onIncoming`
+## 수신 통화 거절·바로 넘기기 — `onIncoming`
 
-`agent.onIncoming()` 에 함수를 등록하면 수신 통화를 **받기 전에** 보고 거절할 수 있습니다.
+`agent.onIncoming()` 에 함수를 등록하면 수신 통화를 **받기 전에** 보고 거절하거나, AI 없이 다른 번호로 바로 넘길 수 있습니다.
 거절한 통화는 받지 않은 채 끝나므로 **과금되지 않고**, 다른 경로로 넘어가지도 않습니다.
 
 ```typescript
@@ -69,6 +69,7 @@ agent.onIncoming(async (call) => {
 | `toNumber` | `string` | 수신 번호 |
 | `callerIdRestricted` | `boolean` | 발신자가 번호 표시제한을 걸고 건 통화면 `true` (위 `CallSession` 과 같은 값) |
 | `reject(opts?)` | `Promise<void>` | 통화를 거절합니다. `reason` 은 `'rejected'`(기본) 또는 `'busy'` |
+| `transfer(to, opts?)` | `Promise<void>` | AI 없이 받아서 `to` 로 넘깁니다. 아래 절 참고 |
 
 | `reason` | 발신자가 듣는 것 |
 |------|------|
@@ -82,6 +83,28 @@ agent.onIncoming(async (call) => {
 - 5초가 지난 뒤 `reject()` 를 부르면 이미 받은 통화라 아무 일도 일어나지 않습니다(경고 로그만 남습니다).
 - `reject()` 를 두 번 불러도 한 번만 처리됩니다. `'rejected'`·`'busy'` 가 아닌 `reason` 을 넘기면 예외가 납니다.
 - `onIncoming()` 을 다시 부르면 이전 함수를 바꿉니다. 등록하지 않으면 모든 수신 통화를 받습니다.
+- `reject()`·`transfer()` 는 먼저 부른 것만 효과가 있습니다.
+
+### AI 없이 바로 넘기기 — `call.transfer()`
+
+지정한 발신자만 AI 가 받고, 나머지는 AI 안내 없이 상담 번호로 바로 연결할 때 씁니다.
+
+```typescript
+const AI_TARGETS = new Set(['01012345678', '01087654321']);
+
+agent.onIncoming(async (call) => {
+  if (!AI_TARGETS.has(call.fromNumber)) {
+    await call.transfer('0212345678', { callerIdMode: 'original' });
+  }
+});
+```
+
+- AI 세션을 시작하지 않습니다. 첫 인사도, 모델 연결도 없고 발신자는 연결음을 듣습니다.
+- 통화가 연결되면 곧바로 전환합니다. `call_start`·`call_end` 등 이벤트는 발화되지 않습니다.
+- 옵션은 `CallSession.transfer()` 와 같습니다. 단 AI 가 이어받을 수 없으므로 `mode: 'blind'`·
+  `afterTransfer: 'terminate'` 로 고정됩니다. 대상이 받지 않으면 `failureMessage` 를 들려주고 끊습니다.
+- 번호 오류 등으로 전환을 시작하지 못하면 통화를 끊습니다.
+- 받은 통화이므로 전환 전 통화 시간과 전환 통화 요금이 붙습니다.
 
 ## CallSession
 
