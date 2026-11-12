@@ -306,7 +306,7 @@ describe('createClawOpsPhoneTools', () => {
 
     it('작별 인사 요청 문구는 언어 중립이고, 이미 인사했으면 반복하지 않게 한다', () => {
       expect(HANG_UP_FAREWELL_PROMPT).toContain('same language as this conversation');
-      expect(HANG_UP_FAREWELL_PROMPT).toContain('already a goodbye');
+      expect(HANG_UP_FAREWELL_PROMPT).toContain('already said goodbye');
     });
   });
 });
