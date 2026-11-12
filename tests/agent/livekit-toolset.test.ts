@@ -8,7 +8,9 @@ import { BuiltinTool } from '../../src/agent/builtin-tool.js';
 
 /** 가짜 `@livekit/agents` `llm` 네임스페이스 — tool/Toolset/ToolFlag 만 흉내낸다. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-class FakeRealtimeModel {}
+class FakeRealtimeModel {
+  constructor(public capabilities: { autoToolReplyGeneration: boolean } = { autoToolReplyGeneration: false }) {}
+}
 
 function fakeLlm() {
   return {
@@ -94,7 +96,13 @@ describe('createClawOpsPhoneTools', () => {
      * (`playedStep`) 들어온다. `earlier` 는 같은 턴 앞 단계에서 이미 한 말.
      */
     function fakeCtx(
-      opts: { spoke?: boolean; interrupted?: boolean; earlier?: string; realtime?: boolean } = {},
+      opts: {
+        spoke?: boolean;
+        interrupted?: boolean;
+        earlier?: string;
+        realtime?: boolean;
+        autoReply?: boolean;
+      } = {},
     ) {
       let resolveStep!: () => void;
       const stepPlayed = new Promise<void>((r) => (resolveStep = r));
@@ -107,9 +115,22 @@ describe('createClawOpsPhoneTools', () => {
         chatItems,
         addDoneCallback: (cb: () => void) => doneCbs.push(cb),
       };
+      const listeners: Record<string, Array<(ev: unknown) => void>> = {};
+      const session = {
+        llm:
+          opts.realtime || opts.autoReply
+            ? new FakeRealtimeModel({ autoToolReplyGeneration: !!opts.autoReply })
+            : {},
+        on: (ev: string, fn: (e: unknown) => void) => (listeners[ev] ??= []).push(fn),
+        off: (ev: string, fn: (e: unknown) => void) => {
+          listeners[ev] = (listeners[ev] ?? []).filter((f) => f !== fn);
+        },
+        emit: (ev: string, e: unknown) => (listeners[ev] ?? []).slice().forEach((f) => f(e)),
+        listeners,
+      };
       const ctx = {
         speechHandle,
-        session: { llm: opts.realtime ? new FakeRealtimeModel() : {} },
+        session,
         disallowInterruptions: () => {
           if (opts.interrupted) throw new Error('already interrupted');
           speechHandle.allowInterruptions = false;
@@ -199,12 +220,51 @@ describe('createClawOpsPhoneTools', () => {
       expect(call.hangup).not.toHaveBeenCalled();
     });
 
-    it('realtime 모델이면 인사를 시키지 않고 재생 뒤 끊는다', async () => {
+    it('OpenAI realtime 도 말 없이 hang_up 만 부르면 인사를 시키고, 그 턴이 끝난 뒤 끊는다', async () => {
       const { call, hangUp } = setup();
-      const { ctx, playedStep } = fakeCtx({ realtime: true });
+      const { ctx, playedStep, turnDone } = fakeCtx({ realtime: true });
       playedStep();
-      await expect(hangUp.execute({}, { ctx })).resolves.toBeUndefined();
+      await expect(hangUp.execute({}, { ctx })).resolves.toBe(HANG_UP_FAREWELL_PROMPT);
+      await tick();
+      expect(call.hangup).not.toHaveBeenCalled();
+      turnDone();
+      await tick();
       expect(call.hangup).toHaveBeenCalledTimes(1);
+    });
+
+    it('도구 응답이 새 발화로 오는 realtime 은 그 발화가 끝난 뒤 끊는다 (createEndCallTool 과 같다)', async () => {
+      const { call, hangUp } = setup();
+      const { ctx, playedStep, turnDone } = fakeCtx({ autoReply: true });
+      playedStep();
+      await expect(hangUp.execute({}, { ctx })).resolves.toBe(HANG_UP_FAREWELL_PROMPT);
+      turnDone(); // 도구를 부른 발화가 끝나도
+      await tick();
+      expect(call.hangup).not.toHaveBeenCalled(); // 인사 발화가 아직이면 끊지 않는다
+      const replyDone: Array<() => void> = [];
+      ctx.session.emit('speech_created', {
+        speechHandle: { addDoneCallback: (cb: () => void) => replyDone.push(cb) },
+      });
+      await tick();
+      expect(call.hangup).not.toHaveBeenCalled();
+      replyDone.forEach((cb) => cb());
+      await tick();
+      expect(call.hangup).toHaveBeenCalledTimes(1);
+      expect(ctx.session.listeners['speech_created']).toEqual([]); // 구독을 남기지 않는다
+    });
+
+    it('새 발화가 끝내 안 생기면 상한에서 끊는다', async () => {
+      vi.useFakeTimers();
+      try {
+        const { call, hangUp } = setup();
+        const { ctx, playedStep } = fakeCtx({ autoReply: true });
+        playedStep();
+        await expect(hangUp.execute({}, { ctx })).resolves.toBe(HANG_UP_FAREWELL_PROMPT);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(call.hangup).toHaveBeenCalledTimes(1);
+        expect(ctx.session.listeners['speech_created']).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('단계 재생 대기가 상한을 다 쓰면 인사를 시키지 않고 끊는다 (대기 합계 = 상한)', async () => {
@@ -244,8 +304,9 @@ describe('createClawOpsPhoneTools', () => {
       }
     });
 
-    it('작별 인사 요청 문구는 언어 중립이다', () => {
+    it('작별 인사 요청 문구는 언어 중립이고, 이미 인사했으면 반복하지 않게 한다', () => {
       expect(HANG_UP_FAREWELL_PROMPT).toContain('same language as this conversation');
+      expect(HANG_UP_FAREWELL_PROMPT).toContain('already a goodbye');
     });
   });
 });

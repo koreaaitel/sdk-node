@@ -30,9 +30,16 @@ export const HANG_UP_PLAYOUT_CAP_MS = 15_000;
  * 에이전트 언어가 제각각이라 지시는 언어 중립으로 두고 「대화 언어로」 말하게 한다.
  */
 export const HANG_UP_FAREWELL_PROMPT =
-  'The call will end now. Say one short goodbye sentence to the caller, in the same language ' +
-  'as this conversation. Do not ask anything, do not start a new topic, and do not call any ' +
-  'tools. The call hangs up as soon as you finish speaking.';
+  'The call will end now. If your last message to the caller was already a goodbye, say nothing ' +
+  'more and output no text. Otherwise say one short goodbye sentence to the caller, in the same ' +
+  'language as this conversation. Do not ask anything, do not start a new topic, and do not call ' +
+  'any tools. The call hangs up as soon as you finish speaking.';
+
+/**
+ * 응답을 스스로 새로 만드는 realtime 모델(도구 결과 뒤 응답이 새 발화로 온다)에서 그 발화가 생기길 기다리는
+ * 상한(ms). LiveKit `createEndCallTool` 과 같은 값.
+ */
+export const HANG_UP_REPLY_CREATED_TIMEOUT_MS = 5_000;
 
 /** `promise` 와 마감 시각(`Date.now()` 기준 ms) 중 먼저 오는 쪽을 기다린다. 대기가 실패해도 던지지 않는다. */
 async function waitUntil(promise: Promise<unknown>, deadline: number): Promise<void> {
@@ -75,6 +82,45 @@ function spokeSince(speech: any, start: number): boolean {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function turnDone(speech: any): Promise<void> {
   return new Promise<void>((resolve) => speech.addDoneCallback(() => resolve()));
+}
+
+/**
+ * 도구 결과에 대한 응답을 모델이 스스로 **새 발화**로 만드는 realtime 세션인가(`autoToolReplyGeneration`).
+ * OpenAI realtime 은 아니다(같은 발화로 응답을 만든다). LiveKit `createEndCallTool` 과 같은 판정.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function repliesInNewSpeech(llm: any, ctx: any): boolean {
+  const model = ctx?.session?.llm;
+  return (
+    typeof llm.RealtimeModel === 'function' &&
+    model instanceof llm.RealtimeModel &&
+    model?.capabilities?.autoToolReplyGeneration === true
+  );
+}
+
+/**
+ * 세션의 다음 `speech_created` 발화가 끝날 때까지 기다린다. `limit`(ms 시각)까지 발화가 안 생기면 그냥
+ * 돌아온다. 구독은 반드시 해제한다.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function nextSpeechDone(session: any, limit: number, deadline: number): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let onCreated: ((ev: any) => void) | undefined;
+  const created = new Promise<unknown>((resolve) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    onCreated = (ev: any) => resolve(ev?.speechHandle);
+    session.on?.('speech_created', onCreated);
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), Math.max(0, limit - Date.now()));
+  });
+  return Promise.race([created, timeout])
+    .then((handle) => (handle ? waitUntil(turnDone(handle), deadline) : undefined))
+    .finally(() => {
+      if (timer) clearTimeout(timer);
+      session.off?.('speech_created', onCreated);
+    });
 }
 
 /**
@@ -152,9 +198,11 @@ export function createClawOpsPhoneTools(
    * 2. `ctx.waitForPlayout()` 을 {@link HANG_UP_PLAYOUT_CAP_MS} 상한으로 기다린다 — 같은 응답에서 먼저 말한 인사.
    * 3. 이 턴에 말한 것이 있으면 끊고 결과 없이(`undefined`) 끝낸다 — 문자열을 돌려주면 닫히는 회선에 대고
    *    응답을 또 만든다.
-   * 4. 파이프라인(STT·LLM·TTS)에서 말 없이 `hang_up` 만 부른 응답이면 끊지 않고
-   *    {@link HANG_UP_FAREWELL_PROMPT} 를 돌려준다. LiveKit 이 같은 턴에서 만든 그 인사의 재생이 끝나면
-   *    뒤에서 끊는다. 판정은 이 도구를 부른 단계에서 한 말만 본다. realtime 모델은 건너뛴다.
+   * 4. 말 없이 `hang_up` 만 부른 응답이면 끊지 않고 {@link HANG_UP_FAREWELL_PROMPT} 를 돌려준다.
+   *    파이프라인과 OpenAI realtime 은 같은 턴에서 그 인사를 만들므로 그 턴이 끝나면 뒤에서 끊는다.
+   *    도구 응답을 새 발화로 만드는 realtime 모델(`autoToolReplyGeneration`)은 LiveKit `createEndCallTool`
+   *    처럼 다음 발화가 끝나면 끊는다. 판정은 이 도구를 부른 단계에서 한 말만 본다. 앞 응답에서 이미 인사를
+   *    했을 수 있어 「이미 했으면 말하지 말라」고 모델에게 맡긴다.
    *
    * 모든 대기는 호출 시점부터 합쳐서 {@link HANG_UP_PLAYOUT_CAP_MS} 안이다.
    */
@@ -173,20 +221,22 @@ export function createClawOpsPhoneTools(
       if (typeof ctx.waitForPlayout === 'function') {
         await waitUntil(Promise.resolve().then(() => ctx.waitForPlayout()), deadline);
       }
-      // realtime 모델은 말한 내용이 음성 전사에서 와 판정이 틀릴 수 있다(인사를 두 번 시킨다) — 파이프라인만.
-      const realtime =
-        typeof llm.RealtimeModel === 'function' && ctx.session?.llm instanceof llm.RealtimeModel;
       if (
         state.deferred === null &&
         typeof speech?.addDoneCallback === 'function' &&
         Date.now() < deadline &&
-        !realtime &&
         !spokeSince(speech, itemsBefore)
       ) {
         // 인사 도중 상대가 먼저 끊었으면 닫힌 회선이다 — 실패는 삼킨다. 세션이 닫히면 speech 도 끝난다.
-        state.deferred = waitUntil(turnDone(speech), deadline)
-          .then(() => hangUpOnce(call))
-          .catch(() => undefined);
+        // 새 발화로 오는 인사는 결과를 돌려주기 **전에** 구독해야 놓치지 않는다.
+        const farewell = repliesInNewSpeech(llm, ctx)
+          ? nextSpeechDone(
+              ctx.session,
+              Math.min(deadline, Date.now() + HANG_UP_REPLY_CREATED_TIMEOUT_MS),
+              deadline,
+            )
+          : waitUntil(turnDone(speech), deadline);
+        state.deferred = farewell.then(() => hangUpOnce(call)).catch(() => undefined);
         return HANG_UP_FAREWELL_PROMPT;
       }
     }
