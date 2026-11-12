@@ -22,6 +22,61 @@ import type { CallSession } from '../session.js';
 /** 인사말 도중 모델이 통화를 끊거나 전환하는 사고를 막는다 (ToolFlag.IGNORE_ON_ENTER). */
 const IGNORE_ON_ENTER_TOOLS = new Set(['hang_up', 'transfer_call']);
 
+/** `hang_up` 의 대기 상한(ms, 호출 시점부터 모든 대기 합계). 재생 완료 신호가 안 와도 통화는 끊는다. */
+export const HANG_UP_PLAYOUT_CAP_MS = 15_000;
+
+/**
+ * 말 없이 `hang_up` 만 부른 응답에 돌려주는 도구 결과. LiveKit 은 이걸 받고 같은 턴에서 한 번 더 응답한다.
+ * 에이전트 언어가 제각각이라 지시는 언어 중립으로 두고 「대화 언어로」 말하게 한다.
+ */
+export const HANG_UP_FAREWELL_PROMPT =
+  'The call will end now. Say one short goodbye sentence to the caller, in the same language ' +
+  'as this conversation. Do not ask anything, do not start a new topic, and do not call any ' +
+  'tools. The call hangs up as soon as you finish speaking.';
+
+/** `promise` 와 마감 시각(`Date.now()` 기준 ms) 중 먼저 오는 쪽을 기다린다. 대기가 실패해도 던지지 않는다. */
+async function waitUntil(promise: Promise<unknown>, deadline: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, Math.max(0, deadline - Date.now()));
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * `speech.chatItems` 의 `start` 번째부터 에이전트가 실제로 말한 문장이 있나.
+ *
+ * LiveKit 은 한 단계의 assistant 메시지를 그 단계의 재생이 끝날 때 넣는다(도구는 그보다 먼저 시작된다).
+ * 도구 진입 시점의 개수부터 보면 **이 도구를 부른 단계**에서 한 말만 센다 — 같은 턴 앞 단계의
+ * 「확인해 볼게요」 같은 말을 작별 인사로 치지 않는다.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function spokeSince(speech: any, start: number): boolean {
+  for (const item of (speech?.chatItems ?? []).slice(start)) {
+    if (item?.type === 'message' && item?.role === 'assistant' && (item.textContent ?? '').trim()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 턴 전체(도구 뒤 후속 응답 포함)의 재생이 끝날 때까지 기다린다.
+ *
+ * ⚠️ `speech.waitForPlayout()` 은 쓰지 않는다 — 도구 안에서 띄운 비동기 작업도 AsyncLocalStorage 로
+ * 「그 도구 안」으로 취급돼 순환 대기 오류를 던진다. `addDoneCallback` 은 그 검사가 없다.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function turnDone(speech: any): Promise<void> {
+  return new Promise<void>((resolve) => speech.addDoneCallback(() => resolve()));
+}
+
 /**
  * 결과를 기다리는 전환 중 끼어들기가 일어나면 이어받을 때 할 말이 사라진다. 도구가 끝나면
  * 되돌린다 — 이어받는 발화는 끊을 수 있어야 한다.
@@ -70,12 +125,75 @@ export function createClawOpsPhoneTools(
   llm: any,
   options: { enabled: Set<BuiltinTool>; excludeNames?: Set<string>; StopResponse?: unknown },
 ): ClawOpsPhoneTools {
-  const state: { call: CallSession | null } = { call: null };
+  const state: { call: CallSession | null; hungUp: boolean; deferred: Promise<void> | null } = {
+    call: null,
+    hungUp: false,
+    deferred: null,
+  };
   const requireCall = (): CallSession => {
     if (!state.call) {
       throw new Error('통화가 아직 연결되지 않았습니다');
     }
     return state.call;
+  };
+
+  const hangUpOnce = async (call: CallSession): Promise<void> => {
+    if (state.hungUp) return;
+    state.hungUp = true;
+    await call.hangup();
+  };
+
+  /**
+   * 작별 인사가 **다 재생된 뒤에** 끊는다. LiveKit 은 도구를 문장 음성 합성·재생과 동시에 돌리므로,
+   * 바로 끊으면 인사가 합성 도중 잘린다.
+   *
+   * 1. 끼어들기를 막는다 — 맞장구가 인사를 끊으면 LiveKit 이 이 도구를 취소해 통화가 안 끝난다.
+   *    이미 끼어들기가 일어났으면 끊지 않는다(발신자가 말을 이었다).
+   * 2. `ctx.waitForPlayout()` 을 {@link HANG_UP_PLAYOUT_CAP_MS} 상한으로 기다린다 — 같은 응답에서 먼저 말한 인사.
+   * 3. 이 턴에 말한 것이 있으면 끊고 결과 없이(`undefined`) 끝낸다 — 문자열을 돌려주면 닫히는 회선에 대고
+   *    응답을 또 만든다.
+   * 4. 파이프라인(STT·LLM·TTS)에서 말 없이 `hang_up` 만 부른 응답이면 끊지 않고
+   *    {@link HANG_UP_FAREWELL_PROMPT} 를 돌려준다. LiveKit 이 같은 턴에서 만든 그 인사의 재생이 끝나면
+   *    뒤에서 끊는다. 판정은 이 도구를 부른 단계에서 한 말만 본다. realtime 모델은 건너뛴다.
+   *
+   * 모든 대기는 호출 시점부터 합쳐서 {@link HANG_UP_PLAYOUT_CAP_MS} 안이다.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const hangUp = async (call: CallSession, ctx?: any): Promise<string | undefined> => {
+    if (ctx) {
+      const deadline = Date.now() + HANG_UP_PLAYOUT_CAP_MS;
+      const speech = ctx.speechHandle;
+      // 이 단계의 assistant 메시지는 재생이 끝나야 들어온다 — 지금 개수가 이 단계의 시작점이다.
+      const itemsBefore = (speech?.chatItems ?? []).length;
+      try {
+        ctx.disallowInterruptions?.();
+      } catch {
+        return '통화를 끊지 않았습니다. 발신자가 말을 이었습니다.';
+      }
+      if (typeof ctx.waitForPlayout === 'function') {
+        await waitUntil(Promise.resolve().then(() => ctx.waitForPlayout()), deadline);
+      }
+      // realtime 모델은 말한 내용이 음성 전사에서 와 판정이 틀릴 수 있다(인사를 두 번 시킨다) — 파이프라인만.
+      const realtime =
+        typeof llm.RealtimeModel === 'function' && ctx.session?.llm instanceof llm.RealtimeModel;
+      if (
+        state.deferred === null &&
+        typeof speech?.addDoneCallback === 'function' &&
+        Date.now() < deadline &&
+        !realtime &&
+        !spokeSince(speech, itemsBefore)
+      ) {
+        // 인사 도중 상대가 먼저 끊었으면 닫힌 회선이다 — 실패는 삼킨다. 세션이 닫히면 speech 도 끝난다.
+        state.deferred = waitUntil(turnDone(speech), deadline)
+          .then(() => hangUpOnce(call))
+          .catch(() => undefined);
+        return HANG_UP_FAREWELL_PROMPT;
+      }
+    }
+    await hangUpOnce(call);
+    // 결과 없음(undefined) = LiveKit 이 응답을 만들지 않는다(`replyRequired: toolOutput !== undefined`).
+    // StopResponse 를 던져도 같지만 agents-js 는 그걸 「도구 실행 중 예외」 error 로그로 남긴다.
+    return undefined;
   };
 
   const exclude = options.excludeNames ?? new Set<string>();
@@ -107,6 +225,9 @@ export function createClawOpsPhoneTools(
             }
             return result;
           }
+          if (name === 'hang_up') {
+            return hangUp(requireCall(), opts?.ctx);
+          }
           return (await executeBuiltinTool(name, args ?? {}, requireCall())) ?? '';
         },
       }),
@@ -118,6 +239,10 @@ export function createClawOpsPhoneTools(
   return {
     toolset,
     setCall: (call: CallSession) => {
+      if (state.call !== call) {
+        state.hungUp = false;
+        state.deferred = null;
+      }
       state.call = call;
     },
   };

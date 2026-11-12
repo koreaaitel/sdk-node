@@ -1,12 +1,18 @@
 import { describe, it, expect, vi } from 'vitest';
 
-import { createClawOpsPhoneTools } from '../../src/agent/livekit/toolset.js';
+import {
+  createClawOpsPhoneTools,
+  HANG_UP_FAREWELL_PROMPT,
+} from '../../src/agent/livekit/toolset.js';
 import { BuiltinTool } from '../../src/agent/builtin-tool.js';
 
 /** 가짜 `@livekit/agents` `llm` 네임스페이스 — tool/Toolset/ToolFlag 만 흉내낸다. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+class FakeRealtimeModel {}
+
 function fakeLlm() {
   return {
+    RealtimeModel: FakeRealtimeModel,
     ToolFlag: { IGNORE_ON_ENTER: 1, NONE: 0 },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     tool: (def: any) => ({ ...def, __tool: true }),
@@ -79,6 +85,167 @@ describe('createClawOpsPhoneTools', () => {
     const hangUp = (phone.toolset as any).tools[0] as any;
     const result = await hangUp.execute({});
     expect(call.hangup).toHaveBeenCalledTimes(1);
-    expect(result).toBe(''); // hang_up 은 빈 문자열
+    expect(result).toBeUndefined(); // 결과 없음 = LiveKit 이 끊은 뒤 응답을 만들지 않는다
+  });
+
+  describe('hang_up 은 작별 인사 재생을 마친 뒤 끊는다', () => {
+    /**
+     * RunContext 중 hang_up 이 쓰는 것만. LiveKit 처럼 이 단계의 assistant 메시지는 단계 재생이 끝날 때
+     * (`playedStep`) 들어온다. `earlier` 는 같은 턴 앞 단계에서 이미 한 말.
+     */
+    function fakeCtx(
+      opts: { spoke?: boolean; interrupted?: boolean; earlier?: string; realtime?: boolean } = {},
+    ) {
+      let resolveStep!: () => void;
+      const stepPlayed = new Promise<void>((r) => (resolveStep = r));
+      const doneCbs: Array<() => void> = [];
+      const chatItems: Array<Record<string, unknown>> = opts.earlier
+        ? [{ type: 'message', role: 'assistant', textContent: opts.earlier }]
+        : [];
+      const speechHandle = {
+        allowInterruptions: true,
+        chatItems,
+        addDoneCallback: (cb: () => void) => doneCbs.push(cb),
+      };
+      const ctx = {
+        speechHandle,
+        session: { llm: opts.realtime ? new FakeRealtimeModel() : {} },
+        disallowInterruptions: () => {
+          if (opts.interrupted) throw new Error('already interrupted');
+          speechHandle.allowInterruptions = false;
+        },
+        waitForPlayout: () => stepPlayed,
+      };
+      const playedStep = () => {
+        if (opts.spoke) {
+          chatItems.push({ type: 'message', role: 'assistant', textContent: '감사합니다. 좋은 하루 보내세요.' });
+        }
+        resolveStep();
+      };
+      return { ctx, playedStep, turnDone: () => doneCbs.forEach((cb) => cb()) };
+    }
+
+    function setup() {
+      const phone = createClawOpsPhoneTools(fakeLlm(), {
+        enabled: new Set([BuiltinTool.HANG_UP]),
+      });
+      const call = { hangup: vi.fn(async () => {}) };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      phone.setCall(call as any);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const hangUp = (phone.toolset as any).tools[0] as any;
+      return { call, hangUp };
+    }
+
+    const tick = () => new Promise((r) => setTimeout(r, 20));
+
+    it('같은 응답에서 말한 인사가 재생될 때까지 끊지 않고, 끊은 뒤 결과 없이 끝낸다', async () => {
+      const { call, hangUp } = setup();
+      const { ctx, playedStep } = fakeCtx({ spoke: true });
+      const running = hangUp.execute({}, { ctx });
+      await tick();
+      expect(call.hangup).not.toHaveBeenCalled();
+      expect(ctx.speechHandle.allowInterruptions).toBe(false);
+      playedStep();
+      await expect(running).resolves.toBeUndefined(); // 결과 없음 = 끊은 뒤 응답 안 만듦
+      expect(call.hangup).toHaveBeenCalledTimes(1);
+    });
+
+    it('재생 완료 신호가 끝내 안 와도 상한에서 끊는다', async () => {
+      vi.useFakeTimers();
+      try {
+        const { call, hangUp } = setup();
+        const { ctx } = fakeCtx({ spoke: true });
+        const running = hangUp.execute({}, { ctx });
+        const settled = expect(running).resolves.toBeUndefined();
+        await vi.advanceTimersByTimeAsync(15_000);
+        await settled;
+        expect(call.hangup).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('이미 끼어들기가 일어났으면 끊지 않는다', async () => {
+      const { call, hangUp } = setup();
+      const { ctx } = fakeCtx({ interrupted: true });
+      const out = await hangUp.execute({}, { ctx });
+      expect(out).toContain('끊지 않았습니다');
+      expect(call.hangup).not.toHaveBeenCalled();
+    });
+
+    it('말 없이 hang_up 만 부르면 인사를 시키고, 그 턴이 끝난 뒤 한 번만 끊는다', async () => {
+      const { call, hangUp } = setup();
+      const { ctx, playedStep, turnDone } = fakeCtx({ spoke: false });
+      playedStep();
+      const out = await hangUp.execute({}, { ctx });
+      expect(out).toBe(HANG_UP_FAREWELL_PROMPT);
+      await tick();
+      expect(call.hangup).not.toHaveBeenCalled(); // 인사 턴이 아직 재생 중
+      // 인사와 함께 hang_up 을 또 불러도 끊기는 한 번
+      const second = fakeCtx({ spoke: true });
+      second.playedStep();
+      await expect(hangUp.execute({}, { ctx: second.ctx })).resolves.toBeUndefined();
+      turnDone();
+      await tick();
+      expect(call.hangup).toHaveBeenCalledTimes(1);
+    });
+
+    it('같은 턴 앞 단계의 말은 작별 인사로 치지 않는다 — 인사를 시킨다', async () => {
+      const { call, hangUp } = setup();
+      const { ctx, playedStep } = fakeCtx({ earlier: '확인해 볼게요.' });
+      playedStep();
+      await expect(hangUp.execute({}, { ctx })).resolves.toBe(HANG_UP_FAREWELL_PROMPT);
+      expect(call.hangup).not.toHaveBeenCalled();
+    });
+
+    it('realtime 모델이면 인사를 시키지 않고 재생 뒤 끊는다', async () => {
+      const { call, hangUp } = setup();
+      const { ctx, playedStep } = fakeCtx({ realtime: true });
+      playedStep();
+      await expect(hangUp.execute({}, { ctx })).resolves.toBeUndefined();
+      expect(call.hangup).toHaveBeenCalledTimes(1);
+    });
+
+    it('단계 재생 대기가 상한을 다 쓰면 인사를 시키지 않고 끊는다 (대기 합계 = 상한)', async () => {
+      vi.useFakeTimers();
+      try {
+        const { call, hangUp } = setup();
+        const { ctx } = fakeCtx(); // 재생 완료 신호가 끝내 안 온다
+        const running = hangUp.execute({}, { ctx });
+        const settled = expect(running).resolves.toBeUndefined();
+        await vi.advanceTimersByTimeAsync(15_000);
+        await settled;
+        expect(call.hangup).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('인사 도중 상대가 먼저 끊어 닫힌 회선이어도 뒤에서 끊는 작업이 예외를 흘리지 않는다', async () => {
+      const phone = createClawOpsPhoneTools(fakeLlm(), { enabled: new Set([BuiltinTool.HANG_UP]) });
+      const call = { hangup: vi.fn(async () => { throw new Error('media ws closed'); }) };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      phone.setCall(call as any);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const hangUp = (phone.toolset as any).tools[0] as any;
+      const { ctx, playedStep, turnDone } = fakeCtx();
+      playedStep();
+      await expect(hangUp.execute({}, { ctx })).resolves.toBe(HANG_UP_FAREWELL_PROMPT);
+      const unhandled = vi.fn();
+      process.on('unhandledRejection', unhandled);
+      try {
+        turnDone();
+        await tick();
+        expect(call.hangup).toHaveBeenCalledTimes(1);
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
+    });
+
+    it('작별 인사 요청 문구는 언어 중립이다', () => {
+      expect(HANG_UP_FAREWELL_PROMPT).toContain('same language as this conversation');
+    });
   });
 });
