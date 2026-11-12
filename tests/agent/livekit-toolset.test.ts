@@ -252,6 +252,30 @@ describe('createClawOpsPhoneTools', () => {
       expect(ctx.session.listeners['speech_created']).toEqual([]); // 구독을 남기지 않는다
     });
 
+    it('Agent 에 준 realtime LLM 도 본다 (세션 LLM 이 없어도 새 발화를 기다린다)', async () => {
+      const { call, hangUp } = setup();
+      const { ctx, playedStep, turnDone } = fakeCtx();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (ctx.session as any).llm = undefined;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (ctx.session as any).currentAgent = {
+        getActivityOrThrow: () => ({ llm: new FakeRealtimeModel({ autoToolReplyGeneration: true }) }),
+      };
+      playedStep();
+      await expect(hangUp.execute({}, { ctx })).resolves.toBe(HANG_UP_FAREWELL_PROMPT);
+      turnDone();
+      await tick();
+      expect(call.hangup).not.toHaveBeenCalled(); // 원래 발화가 끝나도 인사 발화를 기다린다
+      const replyDone: Array<() => void> = [];
+      ctx.session.emit('speech_created', {
+        speechHandle: { addDoneCallback: (cb: () => void) => replyDone.push(cb) },
+      });
+      await tick();
+      replyDone.forEach((cb) => cb());
+      await tick();
+      expect(call.hangup).toHaveBeenCalledTimes(1);
+    });
+
     it('새 발화가 끝내 안 생기면 상한에서 끊는다', async () => {
       vi.useFakeTimers();
       try {

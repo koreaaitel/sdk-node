@@ -90,11 +90,19 @@ function turnDone(speech: any): Promise<void> {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function repliesInNewSpeech(llm: any, ctx: any): boolean {
-  const model = ctx?.session?.llm;
+  // Agent 에 준 LLM 이 세션 LLM 보다 우선한다 — createEndCallTool 처럼 활성 activity 의 LLM 을 본다.
+  let model: unknown;
+  try {
+    model = ctx?.session?.currentAgent?.getActivityOrThrow?.()?.llm;
+  } catch {
+    model = undefined;
+  }
+  model ??= ctx?.session?.llm;
   return (
     typeof llm.RealtimeModel === 'function' &&
     model instanceof llm.RealtimeModel &&
-    model?.capabilities?.autoToolReplyGeneration === true
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (model as any).capabilities?.autoToolReplyGeneration === true
   );
 }
 
