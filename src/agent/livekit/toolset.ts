@@ -22,22 +22,26 @@ import type { CallSession } from '../session.js';
 /** 인사말 도중 모델이 통화를 끊거나 전환하는 사고를 막는다 (ToolFlag.IGNORE_ON_ENTER). */
 const IGNORE_ON_ENTER_TOOLS = new Set(['hang_up', 'transfer_call']);
 
-/** `hang_up` 이 작별 인사 재생을 기다리는 상한(ms). 재생 완료 신호가 안 와도 통화는 끊는다. */
+/** `hang_up` 의 대기 상한(ms, 호출 시점부터 모든 대기 합계). 재생 완료 신호가 안 와도 통화는 끊는다. */
 export const HANG_UP_PLAYOUT_CAP_MS = 15_000;
 
-/** 말 없이 `hang_up` 만 부른 응답에 돌려주는 도구 결과. LiveKit 은 이걸 받고 같은 턴에서 한 번 더 응답한다. */
+/**
+ * 말 없이 `hang_up` 만 부른 응답에 돌려주는 도구 결과. LiveKit 은 이걸 받고 같은 턴에서 한 번 더 응답한다.
+ * 에이전트 언어가 제각각이라 지시는 언어 중립으로 두고 「대화 언어로」 말하게 한다.
+ */
 export const HANG_UP_FAREWELL_PROMPT =
-  '통화 종료가 예약되었습니다. 지금 상대에게 짧은 작별 인사 한 문장만 말하세요. ' +
-  '질문하거나 새 이야기를 꺼내지 말고 도구도 부르지 마세요. 그 말이 끝나면 통화가 끊깁니다.';
+  'The call will end now. Say one short goodbye sentence to the caller, in the same language ' +
+  'as this conversation. Do not ask anything, do not start a new topic, and do not call any ' +
+  'tools. The call hangs up as soon as you finish speaking.';
 
-/** `promise` 와 상한 중 먼저 끝나는 쪽을 기다린다. 대기가 실패해도 끊기는 해야 하니 던지지 않는다. */
-async function waitCapped(promise: Promise<unknown>, capMs: number): Promise<void> {
+/** `promise` 와 마감 시각(`Date.now()` 기준 ms) 중 먼저 오는 쪽을 기다린다. 대기가 실패해도 던지지 않는다. */
+async function waitUntil(promise: Promise<unknown>, deadline: number): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
       promise.catch(() => undefined),
       new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, capMs);
+        timer = setTimeout(resolve, Math.max(0, deadline - Date.now()));
       }),
     ]);
   } finally {
@@ -45,10 +49,16 @@ async function waitCapped(promise: Promise<unknown>, capMs: number): Promise<voi
   }
 }
 
-/** 이 턴(SpeechHandle)에서 에이전트가 실제로 말한 문장이 있었나. */
+/**
+ * `speech.chatItems` 의 `start` 번째부터 에이전트가 실제로 말한 문장이 있나.
+ *
+ * LiveKit 은 한 단계의 assistant 메시지를 그 단계의 재생이 끝날 때 넣는다(도구는 그보다 먼저 시작된다).
+ * 도구 진입 시점의 개수부터 보면 **이 도구를 부른 단계**에서 한 말만 센다 — 같은 턴 앞 단계의
+ * 「확인해 볼게요」 같은 말을 작별 인사로 치지 않는다.
+ */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function spokeThisTurn(speech: any): boolean {
-  for (const item of speech?.chatItems ?? []) {
+function spokeSince(speech: any, start: number): boolean {
+  for (const item of (speech?.chatItems ?? []).slice(start)) {
     if (item?.type === 'message' && item?.role === 'assistant' && (item.textContent ?? '').trim()) {
       return true;
     }
@@ -142,27 +152,39 @@ export function createClawOpsPhoneTools(
    * 2. `ctx.waitForPlayout()` 을 {@link HANG_UP_PLAYOUT_CAP_MS} 상한으로 기다린다 — 같은 응답에서 먼저 말한 인사.
    * 3. 이 턴에 말한 것이 있으면 끊고 결과 없이(`undefined`) 끝낸다 — 문자열을 돌려주면 닫히는 회선에 대고
    *    응답을 또 만든다.
-   * 4. 말 없이 `hang_up` 만 부른 응답이면 끊지 않고 {@link HANG_UP_FAREWELL_PROMPT} 를 돌려준다. LiveKit 이
-   *    같은 턴에서 만든 그 인사의 재생이 끝나면 뒤에서 끊는다(같은 상한).
+   * 4. 파이프라인(STT·LLM·TTS)에서 말 없이 `hang_up` 만 부른 응답이면 끊지 않고
+   *    {@link HANG_UP_FAREWELL_PROMPT} 를 돌려준다. LiveKit 이 같은 턴에서 만든 그 인사의 재생이 끝나면
+   *    뒤에서 끊는다. 판정은 이 도구를 부른 단계에서 한 말만 본다. realtime 모델은 건너뛴다.
+   *
+   * 모든 대기는 호출 시점부터 합쳐서 {@link HANG_UP_PLAYOUT_CAP_MS} 안이다.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const hangUp = async (call: CallSession, ctx?: any): Promise<string | undefined> => {
     if (ctx) {
+      const deadline = Date.now() + HANG_UP_PLAYOUT_CAP_MS;
+      const speech = ctx.speechHandle;
+      // 이 단계의 assistant 메시지는 재생이 끝나야 들어온다 — 지금 개수가 이 단계의 시작점이다.
+      const itemsBefore = (speech?.chatItems ?? []).length;
       try {
         ctx.disallowInterruptions?.();
       } catch {
         return '통화를 끊지 않았습니다. 발신자가 말을 이었습니다.';
       }
       if (typeof ctx.waitForPlayout === 'function') {
-        await waitCapped(Promise.resolve().then(() => ctx.waitForPlayout()), HANG_UP_PLAYOUT_CAP_MS);
+        await waitUntil(Promise.resolve().then(() => ctx.waitForPlayout()), deadline);
       }
-      const speech = ctx.speechHandle;
+      // realtime 모델은 말한 내용이 음성 전사에서 와 판정이 틀릴 수 있다(인사를 두 번 시킨다) — 파이프라인만.
+      const realtime =
+        typeof llm.RealtimeModel === 'function' && ctx.session?.llm instanceof llm.RealtimeModel;
       if (
         state.deferred === null &&
         typeof speech?.addDoneCallback === 'function' &&
-        !spokeThisTurn(speech)
+        Date.now() < deadline &&
+        !realtime &&
+        !spokeSince(speech, itemsBefore)
       ) {
-        state.deferred = waitCapped(turnDone(speech), HANG_UP_PLAYOUT_CAP_MS)
+        // 인사 도중 상대가 먼저 끊었으면 닫힌 회선이다 — 실패는 삼킨다. 세션이 닫히면 speech 도 끝난다.
+        state.deferred = waitUntil(turnDone(speech), deadline)
           .then(() => hangUpOnce(call))
           .catch(() => undefined);
         return HANG_UP_FAREWELL_PROMPT;
