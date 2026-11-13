@@ -1,6 +1,8 @@
-# ClawOps Node.js SDK
+# 한국AI통신 Node.js SDK
 
-[ClawOps Voice API](https://api.claw-ops.com/docs)의 공식 Node.js/TypeScript 라이브러리입니다.
+[한국AI통신](https://koreaaitel.com)(Korea AI Telecom, 옛 이름 ClawOps) API 의 공식 Node.js/TypeScript 라이브러리입니다.
+한국AI통신은 AI 에이전트를 위한 통화 인프라를 만드는 기간통신사업자입니다.
+문서는 [docs.koreaaitel.com](https://docs.koreaaitel.com) 에 있습니다. 패키지·클래스 이름(`@teamlearners/clawops`, `ClawOps`)은 그대로입니다.
 
 [![npm version](https://img.shields.io/npm/v/@teamlearners/clawops.svg)](https://www.npmjs.com/package/@teamlearners/clawops)
 [![Node.js 18+](https://img.shields.io/node/v/@teamlearners/clawops.svg)](https://www.npmjs.com/package/@teamlearners/clawops)
