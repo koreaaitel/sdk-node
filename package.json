@@ -1,7 +1,8 @@
 {
   "name": "@teamlearners/clawops",
-  "version": "0.62.0",
-  "description": "Official Node.js/TypeScript SDK for the ClawOps Voice API",
+  "version": "0.62.1",
+  "description": "Official Node.js/TypeScript SDK for 한국AI통신 (Korea AI Telecom): Korean phone numbers, voice calls, and messaging API for AI agents",
+  "homepage": "https://docs.koreaaitel.com",
   "type": "module",
   "exports": {
     ".": {
@@ -105,6 +106,10 @@
   "keywords": [
     "clawops",
     "claw-ops",
+    "koreaaitel",
+    "korea-ai-telecom",
+    "ai-agent",
+    "korean-phone-number",
     "voice",
     "api",
     "sdk",

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.62.1 (2026-11-13)
+
+Python SDK 0.77.1 과 같은 변경입니다.
+
+### Changed
+- 패키지 설명·홈페이지·키워드를 새 이름 「한국AI통신(Korea AI Telecom)」과 docs.koreaaitel.com 으로 바꿉니다. 코드·패키지 이름(`@teamlearners/clawops`)은 바뀌지 않습니다.
+
 ## 0.62.0 (2026-11-12)
 
 Python SDK 0.77.0 과 같은 변경입니다.
