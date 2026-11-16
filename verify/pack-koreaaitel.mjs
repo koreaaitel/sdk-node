@@ -22,9 +22,6 @@ try {
   manifest.name = "@koreaaitel/sdk";
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
 
-  const readme = join(staging, "README.md");
-  writeFileSync(readme, readFileSync(readme, "utf8").replaceAll(legacy.name, manifest.name));
-
   execFileSync(
     "npm",
     ["pack", "--ignore-scripts", "--pack-destination", destination],

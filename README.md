@@ -4,28 +4,30 @@
 한국AI통신은 AI 에이전트를 위한 통화 인프라를 만드는 기간통신사업자입니다.
 문서는 [docs.koreaaitel.com](https://docs.koreaaitel.com) 에 있습니다.
 
-[![npm version](https://img.shields.io/npm/v/@teamlearners/clawops.svg)](https://www.npmjs.com/package/@teamlearners/clawops)
-[![Node.js 18+](https://img.shields.io/node/v/@teamlearners/clawops.svg)](https://www.npmjs.com/package/@teamlearners/clawops)
+[![npm version](https://img.shields.io/npm/v/@koreaaitel/sdk.svg)](https://www.npmjs.com/package/@koreaaitel/sdk)
+[![Node.js 18+](https://img.shields.io/node/v/@koreaaitel/sdk.svg)](https://www.npmjs.com/package/@koreaaitel/sdk)
 
 ## 설치
 
 ```bash
 # REST API SDK만 사용
-npm install @teamlearners/clawops
+npm install @koreaaitel/sdk
 
 # AI Agent 포함 (필요한 프로바이더를 함께 설치)
-npm install @teamlearners/clawops ws openai                          # OpenAI Realtime 모드
-npm install @teamlearners/clawops ws @google/genai                   # Gemini Realtime 모드
-npm install @teamlearners/clawops ws @deepgram/sdk openai elevenlabs # Pipeline 모드 (OpenAI LLM)
-npm install @teamlearners/clawops ws @deepgram/sdk @anthropic-ai/sdk elevenlabs # Pipeline 모드 (Anthropic LLM)
+npm install @koreaaitel/sdk ws openai                          # OpenAI Realtime 모드
+npm install @koreaaitel/sdk ws @google/genai                   # Gemini Realtime 모드
+npm install @koreaaitel/sdk ws @deepgram/sdk openai elevenlabs # Pipeline 모드 (OpenAI LLM)
+npm install @koreaaitel/sdk ws @deepgram/sdk @anthropic-ai/sdk elevenlabs # Pipeline 모드 (Anthropic LLM)
 ```
+
+기존 `npm install @teamlearners/clawops`도 지원합니다. 기존 패키지를 쓰는 프로젝트는 현재 import 경로를 계속 사용할 수 있습니다.
 
 ## AI Agent (음성 에이전트)
 
 `ClawOpsAgent`를 사용하면 한 줄로 인바운드 전화를 AI로 처리할 수 있습니다. ngrok 없이 WebSocket 역방향 연결로 동작합니다.
 
 ```typescript
-import { ClawOpsAgent, OpenAIRealtime } from '@teamlearners/clawops/agent';
+import { ClawOpsAgent, OpenAIRealtime } from '@koreaaitel/sdk/agent';
 
 const agent = new ClawOpsAgent({
   from: '07012341234',
@@ -82,7 +84,7 @@ const agent = new ClawOpsAgent({
 AI가 통화 중 다른 번호로 전환할 수 있습니다. Blind(즉시)와 Warm(안내 후) 모드를 지원합니다.
 
 ```typescript
-import { ClawOpsAgent, OpenAIRealtime, BuiltinTool } from '@teamlearners/clawops/agent';
+import { ClawOpsAgent, OpenAIRealtime, BuiltinTool } from '@koreaaitel/sdk/agent';
 
 const agent = new ClawOpsAgent({
   from: '07012341234',
@@ -107,11 +109,11 @@ await agent.serve();
 MCP 서버를 연결하여 AI에게 외부 도구를 제공할 수 있습니다.
 
 ```bash
-npm install @teamlearners/clawops ws @modelcontextprotocol/sdk
+npm install @koreaaitel/sdk ws @modelcontextprotocol/sdk
 ```
 
 ```typescript
-import { ClawOpsAgent, OpenAIRealtime, mcpServerStdio, mcpServerHTTP } from '@teamlearners/clawops/agent';
+import { ClawOpsAgent, OpenAIRealtime, mcpServerStdio, mcpServerHTTP } from '@koreaaitel/sdk/agent';
 
 const agent = new ClawOpsAgent({
   from: '07012341234',
@@ -134,7 +136,7 @@ MCP 서버는 전화가 올 때마다 자동으로 시작되고, 통화 종료 �
 통화 흐름, MCP 도구 호출, LLM 세션을 OpenTelemetry로 추적할 수 있습니다.
 
 ```bash
-npm install @teamlearners/clawops ws @opentelemetry/api @opentelemetry/sdk-trace-base @opentelemetry/exporter-trace-otlp-grpc
+npm install @koreaaitel/sdk ws @opentelemetry/api @opentelemetry/sdk-trace-base @opentelemetry/exporter-trace-otlp-grpc
 ```
 
 ```typescript
@@ -146,7 +148,7 @@ const provider = new NodeTracerProvider();
 provider.addSpanProcessor(new BatchSpanProcessor(new OTLPTraceExporter()));
 provider.register();
 
-import { ClawOpsAgent, OpenAIRealtime, setTracingConfig } from '@teamlearners/clawops/agent';
+import { ClawOpsAgent, OpenAIRealtime, setTracingConfig } from '@koreaaitel/sdk/agent';
 
 setTracingConfig({ enabled: true, serviceName: 'my-call-center' });
 
@@ -164,7 +166,7 @@ const agent = new ClawOpsAgent({
 ## REST API 사용법
 
 ```typescript
-import ClawOps from '@teamlearners/clawops';
+import ClawOps from '@koreaaitel/sdk';
 
 const client = new ClawOps({
   apiKey: 'sk_...',          // 또는 CLAWOPS_API_KEY 환경변수 사용
@@ -572,14 +574,14 @@ await client.messages.create({
 알림톡·친구톡·RCS 는 기존 솔라피 계정으로 계속 나갑니다.
 
 ```bash
-npm install @teamlearners/clawops solapi
+npm install @koreaaitel/sdk solapi
 ```
 
 바꾸는 곳은 **인스턴스를 만드는 한 줄**뿐입니다.
 
 ```typescript
-import { ClawOps } from '@teamlearners/clawops';
-import { ClawOpsMessageService } from '@teamlearners/clawops/solapi';
+import { ClawOps } from '@koreaaitel/sdk';
+import { ClawOpsMessageService } from '@koreaaitel/sdk/solapi';
 import { SolapiMessageService } from 'solapi';
 
 const messageService = new ClawOpsMessageService({
@@ -745,7 +747,7 @@ ClawOps 가 대체 문자를 거절하면 `onBlocked` 에 `reason: 'send_rejecte
 | 시간 규제 | `3108` | 발송 가능 시간이 아닌데 문자로 나갑니다 |
 
 ```typescript
-import { RECOMMENDED_EXCLUDED_CODES } from '@teamlearners/clawops/solapi';
+import { RECOMMENDED_EXCLUDED_CODES } from '@koreaaitel/sdk/solapi';
 
 fallback: {
   enabled: true,
@@ -763,7 +765,7 @@ fallback: {
 **상주 프로세스가 없다면**(서버리스·크론) 같은 일을 하는 함수를 직접 부르십시오.
 
 ```typescript
-import { sweepFailedAlimtalk } from '@teamlearners/clawops/solapi';
+import { sweepFailedAlimtalk } from '@koreaaitel/sdk/solapi';
 
 const result = await sweepFailedAlimtalk({
   clawops, solapi, from: '07052358010',
@@ -832,7 +834,7 @@ client.webhooks.verify({
 ## 에러 처리
 
 ```typescript
-import ClawOps, { BadRequestError, AuthenticationError, NotFoundError } from '@teamlearners/clawops';
+import ClawOps, { BadRequestError, AuthenticationError, NotFoundError } from '@koreaaitel/sdk';
 
 const client = new ClawOps();
 
@@ -855,7 +857,7 @@ try {
 있습니다. 서버가 `code` 를 싣지 않은 응답에서는 `undefined` 입니다.
 
 ```typescript
-import { UnprocessableEntityError } from '@teamlearners/clawops';
+import { UnprocessableEntityError } from '@koreaaitel/sdk';
 
 try {
   await client.messages.create({ to, from, kakao: { channelId, templateId, variables } });
