@@ -18,12 +18,12 @@
 ## 1. SDK 설치
 
 ```bash
-npm install @teamlearners/clawops@latest
+npm install @koreaaitel/sdk@latest
 ```
 
 ```bash
-npm ls @teamlearners/clawops
-# └── @teamlearners/clawops@0.43.0   ← 이 이상이어야 합니다
+npm ls @koreaaitel/sdk
+# └── @koreaaitel/sdk@0.62.2
 ```
 
 > `0.43.0` 미만에서는 아래 설정을 전부 맞추셔도 배포 중에 전화가 끊깁니다. 버전 확인이 1번인 이유입니다.
@@ -35,7 +35,7 @@ npm ls @teamlearners/clawops
 `serve()` 가 전부입니다. 연결·재연결·종료 절차를 SDK 가 맡습니다.
 
 ```js
-import { ClawOpsAgent } from '@teamlearners/clawops/agent';
+import { ClawOpsAgent } from '@koreaaitel/sdk/agent';
 
 const agent = new ClawOpsAgent({ from: '07012345678', session: mySession });
 

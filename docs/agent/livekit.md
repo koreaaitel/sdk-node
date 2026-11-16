@@ -8,7 +8,7 @@
 ## 설치
 
 ```bash
-npm i @teamlearners/clawops
+npm i @koreaaitel/sdk
 npm i @livekit/agents @livekit/rtc-node
 npm i @livekit/agents-plugin-openai @livekit/agents-plugin-cartesia   # 쓰는 플러그인만
 ```
@@ -24,9 +24,9 @@ import { voice } from '@livekit/agents';
 import * as openai from '@livekit/agents-plugin-openai';
 import * as cartesia from '@livekit/agents-plugin-cartesia';
 
-import { ClawOpsAgent } from '@teamlearners/clawops/agent';
-import { LiveKitSession } from '@teamlearners/clawops/agent/livekit';
-import type { LiveKitCreateFn } from '@teamlearners/clawops/agent/livekit';
+import { ClawOpsAgent } from '@koreaaitel/sdk/agent';
+import { LiveKitSession } from '@koreaaitel/sdk/agent/livekit';
+import type { LiveKitCreateFn } from '@koreaaitel/sdk/agent/livekit';
 
 const create: LiveKitCreateFn = async (call) => {   // 통화당 1회 호출
   const session = new voice.AgentSession({
@@ -77,7 +77,7 @@ opt-in and is not enabled by installing this SDK. The server must support it fir
 Select `MediaProfile.PCM_S16LE_16000` before prewarm with
 `new LiveKitSession(create, { mediaProfile })` and use the same value in
 `new MediaWebSocket({ expectedMediaProfile: mediaProfile })`. Import `MediaProfile`
-from `@teamlearners/clawops/agent`. This integration is for callers that wire the
+from `@koreaaitel/sdk/agent`. This integration is for callers that wire the
 transport explicitly; ordinary `ClawOpsAgent`, pipeline and realtime paths retain
 8kHz defaults.
 

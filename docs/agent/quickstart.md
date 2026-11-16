@@ -4,22 +4,24 @@
 
 ```bash
 # 기본 (OpenAI Realtime 모드)
-npm install @teamlearners/clawops ws openai
+npm install @koreaaitel/sdk ws openai
 
 # Gemini Realtime 모드
-npm install @teamlearners/clawops ws @google/genai
+npm install @koreaaitel/sdk ws @google/genai
 
 # 파이프라인 모드
-npm install @teamlearners/clawops ws @deepgram/sdk openai elevenlabs       # OpenAI LLM
-npm install @teamlearners/clawops ws @deepgram/sdk @anthropic-ai/sdk elevenlabs  # Anthropic LLM
-npm install @teamlearners/clawops ws @deepgram/sdk @google/genai elevenlabs # Gemini LLM
+npm install @koreaaitel/sdk ws @deepgram/sdk openai elevenlabs       # OpenAI LLM
+npm install @koreaaitel/sdk ws @deepgram/sdk @anthropic-ai/sdk elevenlabs  # Anthropic LLM
+npm install @koreaaitel/sdk ws @deepgram/sdk @google/genai elevenlabs # Gemini LLM
 
 # MCP 서버 지원 포함
-npm install @teamlearners/clawops ws @modelcontextprotocol/sdk
+npm install @koreaaitel/sdk ws @modelcontextprotocol/sdk
 
 # LiveKit Agents 실행 — docs/agent/livekit.md 참조
-npm install @teamlearners/clawops @livekit/agents @livekit/rtc-node
+npm install @koreaaitel/sdk @livekit/agents @livekit/rtc-node
 ```
+
+기존 `npm install @teamlearners/clawops`도 지원합니다. 기존 패키지를 쓰는 프로젝트는 현재 import 경로를 계속 사용할 수 있습니다.
 
 ## 환경변수
 
@@ -47,7 +49,7 @@ export ELEVENLABS_API_KEY="..."          # Pipeline: ElevenLabsTTS
 ## 최소 예제
 
 ```typescript
-import { ClawOpsAgent, OpenAIRealtime } from '@teamlearners/clawops/agent';
+import { ClawOpsAgent, OpenAIRealtime } from '@koreaaitel/sdk/agent';
 
 const agent = new ClawOpsAgent({
   from: '07012341234',
@@ -64,7 +66,7 @@ await agent.serve(); // Ctrl+C로 종료
 ## 설정 옵션
 
 ```typescript
-import { ClawOpsAgent, OpenAIRealtime } from '@teamlearners/clawops/agent';
+import { ClawOpsAgent, OpenAIRealtime } from '@koreaaitel/sdk/agent';
 
 const agent = new ClawOpsAgent({
   // 필수
@@ -99,7 +101,7 @@ const agent = new ClawOpsAgent({
 ### Gemini Realtime 사용 시
 
 ```typescript
-import { ClawOpsAgent, GeminiRealtime } from '@teamlearners/clawops/agent';
+import { ClawOpsAgent, GeminiRealtime } from '@koreaaitel/sdk/agent';
 
 const agent = new ClawOpsAgent({
   from: '07012341234',
@@ -119,7 +121,7 @@ Gemini Live API의 음성 감지 세부 설정을 `realtimeInputConfig`로 전�
 구조는 [@google/genai SDK의 `RealtimeInputConfig`](https://ai.google.dev/gemini-api/docs/live-api/capabilities#configure-automatic-vad)를 그대로 따릅니다.
 
 ```typescript
-import { ClawOpsAgent, GeminiRealtime } from '@teamlearners/clawops/agent';
+import { ClawOpsAgent, GeminiRealtime } from '@koreaaitel/sdk/agent';
 
 const agent = new ClawOpsAgent({
   from: '07012341234',
@@ -317,7 +319,7 @@ agent.on('call_start', (call) => {
 ## 발신 (Outbound Call)
 
 ```typescript
-import { ClawOpsAgent, OpenAIRealtime } from '@teamlearners/clawops/agent';
+import { ClawOpsAgent, OpenAIRealtime } from '@koreaaitel/sdk/agent';
 
 const agent = new ClawOpsAgent({
   from: '07012345678',
@@ -389,7 +391,7 @@ agent.on('call_failed', async (call, reason) => {
 프로세스가 이미 종료됐거나 다른 서버에서 결과를 확인해야 한다면 통화 조회 API 를 쓰세요.
 
 ```typescript
-import { ClawOps } from '@teamlearners/clawops';
+import { ClawOps } from '@koreaaitel/sdk';
 
 const client = new ClawOps(); // CLAWOPS_API_KEY / CLAWOPS_ACCOUNT_ID 사용
 const call = await client.calls.get(session.callId);
@@ -428,8 +430,8 @@ console.log(call.status); // endedStatus 와 같은 값
 ## 에러 처리
 
 ```typescript
-import { ClawOpsAgent, OpenAIRealtime } from '@teamlearners/clawops/agent';
-import { AgentError, AgentConnectionError } from '@teamlearners/clawops';
+import { ClawOpsAgent, OpenAIRealtime } from '@koreaaitel/sdk/agent';
+import { AgentError, AgentConnectionError } from '@koreaaitel/sdk';
 
 const agent = new ClawOpsAgent({
   from: '07012341234',

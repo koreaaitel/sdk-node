@@ -5,7 +5,7 @@
 ## 설정
 
 ```typescript
-import { ClawOpsAgent, OpenAIRealtime } from '@teamlearners/clawops/agent';
+import { ClawOpsAgent, OpenAIRealtime } from '@koreaaitel/sdk/agent';
 
 const agent = new ClawOpsAgent({
   from: '07012341234',

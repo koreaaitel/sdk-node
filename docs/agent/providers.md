@@ -56,7 +56,7 @@ STT → LLM → TTS를 개별 조합하는 방식입니다. `PipelineSession`에
 
 ```bash
 # 코어 패키지 (모든 제공자 포함)
-npm install @teamlearners/clawops
+npm install @koreaaitel/sdk
 
 # 환경변수 설정 (사용하는 제공자만)
 OPENAI_API_KEY=sk-...               # OpenAI Realtime / LLM (검증 완료)
