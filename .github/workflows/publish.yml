@@ -30,3 +30,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
         run: gh release create "$TAG_NAME" --generate-notes
+
+  publish-koreaaitel:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run build
+      - run: node verify/pack-koreaaitel.mjs release-packages
+      - name: Publish @koreaaitel/sdk
+        run: npm publish release-packages/koreaaitel-sdk-*.tgz --access public --provenance
