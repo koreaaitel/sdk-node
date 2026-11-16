@@ -316,7 +316,7 @@ describe('APIClient', () => {
         () =>
           new APIClient({
             apiKey: 'sk_test',
-            baseURL: 'https://api.claw-ops.com',
+            baseURL: 'https://api.koreaaitel.com',
             maxRetries: 0,
           }),
       ).not.toThrow();
