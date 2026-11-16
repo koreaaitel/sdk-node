@@ -22,6 +22,25 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Install both SDK package names
+        if: matrix.node-version == 22
+        run: |
+          packages="$(mktemp -d)"
+          npm pack --ignore-scripts --pack-destination "$packages"
+          node verify/pack-koreaaitel.mjs "$packages"
+          cd "$(mktemp -d)"
+          npm install --ignore-scripts "$packages"/teamlearners-clawops-*.tgz "$packages"/koreaaitel-sdk-*.tgz
+          node -e '
+            for (const name of ["@teamlearners/clawops", "@koreaaitel/sdk"]) {
+              if (typeof require(name).ClawOps !== "function") throw Error(name);
+              for (const path of ["/agent", "/agent/livekit", "/solapi"]) require.resolve(name + path);
+            }
+          '
+          node --input-type=module -e '
+            import { ClawOps as Legacy } from "@teamlearners/clawops";
+            import { ClawOps as Branded } from "@koreaaitel/sdk";
+            if (typeof Legacy !== "function" || typeof Branded !== "function") throw Error("SDK exports");
+          '
 
   livekit-runtime:
     runs-on: ubuntu-latest
