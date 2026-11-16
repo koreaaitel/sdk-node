@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.62.2 (2026-11-16)
+
+### Added
+- 동일한 Node.js SDK를 `@teamlearners/clawops`와 `@koreaaitel/sdk`로 배포합니다.
+
 ## 0.62.1 (2026-11-13)
 
 Python SDK 0.77.1 과 같은 변경입니다.
