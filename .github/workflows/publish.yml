@@ -4,9 +4,11 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 jobs:
   publish:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -33,6 +35,9 @@ jobs:
 
   publish-koreaaitel:
     needs: publish
+    if: >-
+      ${{ !cancelled() && (needs.publish.result == 'success' ||
+          (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -43,8 +48,17 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+      - name: Check the source matches the existing release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(node -p 'require("./package.json").version')"
+          gh release view "$tag" --json isDraft --jq '.isDraft' | grep -qx false
+          git fetch --depth=1 origin "refs/tags/$tag"
+          git diff --exit-code FETCH_HEAD HEAD -- . ':(exclude).github/workflows/publish.yml'
       - run: npm ci
       - run: npm run build
       - run: node verify/pack-koreaaitel.mjs release-packages
       - name: Publish @koreaaitel/sdk
-        run: npm publish release-packages/koreaaitel-sdk-*.tgz --access public --provenance
+        run: npm publish ./release-packages/koreaaitel-sdk-*.tgz --access public --provenance
