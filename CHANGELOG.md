@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.62.3 (2026-11-17)
+
+### Changed
+- 기본 API 주소를 `https://api.koreaaitel.com`으로 변경합니다.
+
 ## 0.62.2 (2026-11-16)
 
 ### Added
