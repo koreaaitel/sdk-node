@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { PipelineSession } from '../../src/agent/pipeline/pipeline-session.js';
+import type { CallSession } from '../../src/agent/session.js';
 import type { STT, LLM, TTS, SpeechEvent, LLMChunk, Session } from '../../src/agent/pipeline/base.js';
 
 function createMockSTT(): STT {
@@ -87,6 +88,65 @@ describe('PipelineSession', () => {
       interruptOnSpeech: false,
     });
     expect(session).toBeDefined();
+  });
+
+  it('discards queued and in-flight replies when reused for another call', async () => {
+    let finishOldReply!: () => void;
+    const oldReplyPending = new Promise<void>((resolve) => { finishOldReply = resolve; });
+    let markOldTurnsQueued!: () => void;
+    const oldTurnsQueued = new Promise<void>((resolve) => { markOldTurnsQueued = resolve; });
+    let sttRuns = 0;
+    const generate = vi.fn();
+    const speak = vi.fn();
+    const session = new PipelineSession({
+      stt: {
+        async *transcribe(): AsyncGenerator<SpeechEvent> {
+          if (++sttRuns === 1) {
+            yield { type: 'final', transcript: 'old first' };
+            yield { type: 'final', transcript: 'old queued' };
+            markOldTurnsQueued();
+          } else {
+            yield { type: 'final', transcript: 'new caller' };
+          }
+        },
+      },
+      llm: {
+        async *generate(messages): AsyncGenerator<LLMChunk> {
+          const input = messages.at(-1)?.content;
+          generate(input);
+          if (input === 'old first') await oldReplyPending;
+          yield { type: 'text', text: `reply to ${input}` };
+        },
+      },
+      tts: {
+        async *synthesize(text) {
+          speak(text);
+          yield Buffer.alloc(320);
+        },
+      },
+      greeting: false,
+    });
+    const oldCallAudio = vi.fn();
+    const newCallAudio = vi.fn();
+    await session.start({ sendAudio: oldCallAudio } as unknown as CallSession);
+
+    try {
+      await oldTurnsQueued;
+      expect(generate.mock.calls).toEqual([['old first']]);
+      await session.stop();
+      await session.start({ sendAudio: newCallAudio } as unknown as CallSession);
+      await vi.waitFor(() => expect(newCallAudio).toHaveBeenCalledOnce());
+      finishOldReply();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(oldCallAudio).not.toHaveBeenCalled();
+      expect(newCallAudio).toHaveBeenCalledOnce();
+      expect(generate.mock.calls).toEqual([['old first'], ['new caller']]);
+      expect(speak.mock.calls).toEqual([['reply to new caller']]);
+    } finally {
+      finishOldReply();
+      await session.stop();
+    }
   });
 
   it('stop resolves without error', async () => {

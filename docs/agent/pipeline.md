@@ -261,6 +261,26 @@ const tts = new ElevenLabsTTS({
 - WebSocket 스트리밍 (낮은 지연)
 - `sampleRate` 속성 자동 추출 (`pcm_24000` → 24000)
 
+### TypecastTTS
+
+Typecast 목소리로 에이전트의 답변을 읽습니다. 에이전트를 실행하는 서버에 Typecast의 `TYPECAST_API_KEY`를 설정하고, `voice`에 사용할 음성 ID를 지정하세요. 모델 기본값은 `ssfm-v31`, 언어 기본값은 `ko`입니다. 아래 예제는 `openai` 패키지와 `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`도 사용합니다.
+
+```typescript
+import { ClawOpsAgent, DeepgramSTT, OpenAILLM, PipelineSession, TypecastTTS } from '@koreaaitel/sdk/agent';
+
+const agent = new ClawOpsAgent({
+  from: '07012341234',
+  session: new PipelineSession({
+    stt: new DeepgramSTT(),
+    llm: new OpenAILLM({ model: 'gpt-4o-mini' }),
+    sampleRate: 16000,
+    tts: new TypecastTTS({ voice: 'tc_6af54d77f4d336c400d1370d' }),
+  }),
+});
+```
+
+`PipelineSession`은 STT로 발신자의 말을 듣고 LLM으로 답을 만든 뒤 Typecast로 발화합니다. 모델이 직접 음성을 만드는 `OpenAIRealtime`과 `GeminiRealtime`은 각 모델의 음성 설정을 사용합니다. [Typecast 스트리밍 API](https://typecast.ai/docs/api-reference/text-to-speech/streaming-text-to-speech)
+
 ## Barge-in (끼어들기)
 
 사용자가 말하면 AI 오디오를 즉시 중단합니다.

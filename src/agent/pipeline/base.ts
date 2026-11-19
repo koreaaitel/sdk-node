@@ -112,6 +112,8 @@ export interface TTS {
     options?: {
       voice?: string;
       sampleRate?: number;
+      /** Cancels synthesis when playback is interrupted or the call ends. */
+      signal?: AbortSignal;
     },
   ): AsyncGenerator<Buffer>;
 }

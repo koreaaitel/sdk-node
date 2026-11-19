@@ -68,8 +68,8 @@ export class PipelineSession implements Session {
   private _recorder: AudioRecorder | null = null;
   private _conversation: ConversationMessage[] = [];
   private _audioBuffer: Buffer[] = [];
-  private _running = false;
-  private _speaking = false;
+  private _callRun: AbortController | null = null;
+  private _activeSynthesis: AbortController | null = null;
   private _builtinTools: Set<BuiltinTool> | null = null;
   private _holdAudioChunks: Buffer[] | null = null;
   private _log: Logger = NOOP_LOGGER;
@@ -142,8 +142,11 @@ export class PipelineSession implements Session {
    */
   async prewarm(tools?: ToolRegistry): Promise<void> {
     if (tools) this._tools = tools;
+    this._callRun?.abort();
+    this._activeSynthesis?.abort();
+    const run = new AbortController();
+    this._callRun = run;
     this._callSession = new BufferingCall();
-    this._running = true;
     this._conversation = [];
     this._log.info('PipelineSession prewarmed');
 
@@ -155,12 +158,12 @@ export class PipelineSession implements Session {
     }
 
     if (this._greeting) {
-      this._generateGreeting().catch((err) => {
+      this._generateGreeting(run.signal).catch((err) => {
         this._log.error({ err }, 'Greeting error');
       });
     }
 
-    this._runSttLoop().catch((err) => {
+    this._runSttLoop(run.signal).catch((err) => {
       this._log.error({ err }, 'STT loop error');
     });
   }
@@ -179,36 +182,45 @@ export class PipelineSession implements Session {
   }
 
   feedAudio(audio: Buffer): void {
-    if (this._running) {
+    if (this._callRun) {
       this._audioBuffer.push(audio);
     }
   }
 
   async feedDtmf(digits: string): Promise<void> {
+    const signal = this._callRun?.signal;
+    if (!signal) return;
     this._conversation.push({
       role: 'user',
       content: `[DTMF 입력: ${digits}]`,
     });
-    await this._respond();
+    await this._respond(signal);
   }
 
   async stop(): Promise<void> {
-    this._running = false;
+    this._callRun?.abort();
+    this._callRun = null;
+    this._activeSynthesis?.abort();
     this._log.info('PipelineSession stopped');
     this._audioBuffer = [];
   }
 
-  private async _runSttLoop(): Promise<void> {
-    const audioStream = this._createAudioStream();
+  private async _runSttLoop(signal: AbortSignal): Promise<void> {
+    const audioStream = this._createAudioStream(signal);
+    let response = Promise.resolve();
 
     for await (const event of this._stt.transcribe(audioStream, {
       sampleRate: this._sampleRate,
     })) {
-      if (!this._running) break;
+      if (signal.aborted) break;
 
-      if (event.type === 'interim' && this._speaking && this._interruptOnSpeech) {
-        // User started speaking while TTS is active - interrupt
-        this._speaking = false;
+      if (
+        event.type === 'interim' &&
+        this._activeSynthesis &&
+        !this._activeSynthesis.signal.aborted &&
+        this._interruptOnSpeech
+      ) {
+        this._activeSynthesis.abort();
         if (this._callSession) {
           this._callSession.clearAudio();
         }
@@ -217,13 +229,22 @@ export class PipelineSession implements Session {
 
       if (event.type === 'final' && event.transcript.trim()) {
         this._log.info('STT: %s', event.transcript);
-        await this._handleUserSpeech(event.transcript);
+        // Keep dialogue turns in order without blocking STT interim events during playback.
+        const transcript = event.transcript;
+        response = response
+          .then(async () => {
+            if (!signal.aborted) await this._handleUserSpeech(transcript, signal);
+          })
+          .catch((err) => {
+            this._log.error({ err }, 'Response error');
+          });
       }
     }
+    await response;
   }
 
-  private async *_createAudioStream(): AsyncGenerator<Buffer> {
-    while (this._running) {
+  private async *_createAudioStream(signal: AbortSignal): AsyncGenerator<Buffer> {
+    while (!signal.aborted) {
       if (this._audioBuffer.length > 0) {
         const ulaw = this._audioBuffer.shift()!;
         // G.711 ulaw 8kHz → PCM16 8kHz → PCM16 16kHz
@@ -237,14 +258,14 @@ export class PipelineSession implements Session {
     }
   }
 
-  private async _generateGreeting(): Promise<void> {
+  private async _generateGreeting(signal: AbortSignal): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 500));
-    await this._respond();
+    await this._respond(signal);
   }
 
-  private async _handleUserSpeech(transcript: string): Promise<void> {
+  private async _handleUserSpeech(transcript: string, signal: AbortSignal): Promise<void> {
     this._conversation.push({ role: 'user', content: transcript });
-    await this._respond();
+    await this._respond(signal);
   }
 
   private _buildEffectiveTools(): ToolRegistry | undefined {
@@ -273,7 +294,8 @@ export class PipelineSession implements Session {
     return base;
   }
 
-  private async _respond(): Promise<void> {
+  private async _respond(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return;
     // Run LLM generation (may include tool calls)
     let fullResponse = '';
     const textChunks: string[] = [];
@@ -286,25 +308,25 @@ export class PipelineSession implements Session {
     });
 
     for await (const chunk of llmStream) {
-      if (!this._running) break;
+      if (signal.aborted) break;
 
       if (chunk.type === 'text' && chunk.text) {
         textChunks.push(chunk.text);
         fullResponse += chunk.text;
       } else if (chunk.type === 'tool_call' && chunk.toolCall) {
-        await this._handleToolCall(chunk);
+        await this._handleToolCall(chunk, signal);
       }
     }
 
-    if (fullResponse.trim()) {
+    if (!signal.aborted && fullResponse.trim()) {
       this._log.info('Assistant: %s', fullResponse.substring(0, 100));
       this._conversation.push({ role: 'assistant', content: fullResponse });
       // Synthesize and send audio
-      await this._synthesizeAndSend(fullResponse);
+      await this._synthesizeAndSend(fullResponse, signal);
     }
   }
 
-  private async _handleToolCall(chunk: LLMChunk): Promise<void> {
+  private async _handleToolCall(chunk: LLMChunk, signal: AbortSignal): Promise<void> {
     if (!chunk.toolCall) return;
 
     const { id, name, arguments: argsStr } = chunk.toolCall;
@@ -315,10 +337,11 @@ export class PipelineSession implements Session {
       // Built-in tools - intercept before registry lookup
       if (BUILTIN_TOOL_NAMES.has(name) && this._callSession && !(this._callSession instanceof BufferingCall)) {
         const result = await executeBuiltinTool(name, args, this._callSession);
+        if (signal.aborted) return;
         if (result !== null) {
           if (name === 'hang_up') return;
           this._conversation.push({ role: 'tool', content: result, tool_call_id: id, name });
-          await this._respond();
+          await this._respond(signal);
           return;
         }
       }
@@ -332,7 +355,7 @@ export class PipelineSession implements Session {
           tool_call_id: id,
           name,
         });
-        await this._respond();
+        await this._respond(signal);
         return;
       }
 
@@ -352,6 +375,7 @@ export class PipelineSession implements Session {
         player?.stop();
       }
 
+      if (signal.aborted) return;
       this._conversation.push({
         role: 'assistant',
         content: '',
@@ -374,34 +398,37 @@ export class PipelineSession implements Session {
       });
 
       for await (const followChunk of followUpStream) {
-        if (!this._running) break;
+        if (signal.aborted) break;
         if (followChunk.type === 'text' && followChunk.text) {
           followUpText += followChunk.text;
         }
       }
 
-      if (followUpText.trim()) {
+      if (!signal.aborted && followUpText.trim()) {
         this._conversation.push({ role: 'assistant', content: followUpText });
-        await this._synthesizeAndSend(followUpText);
+        await this._synthesizeAndSend(followUpText, signal);
       }
     } catch (err) {
       this._log.error({ err }, 'Tool call failed: %s', name);
-      if (err instanceof Error) {
+      if (err instanceof Error && !signal.aborted) {
         this._callSession?.recordToolError(err);
       }
     }
   }
 
-  private async _synthesizeAndSend(text: string): Promise<void> {
-    if (!this._callSession || !this._running) return;
+  private async _synthesizeAndSend(text: string, signal: AbortSignal): Promise<void> {
+    if (!this._callSession || signal.aborted) return;
 
-    this._speaking = true;
+    const synthesis = new AbortController();
+    this._activeSynthesis?.abort();
+    this._activeSynthesis = synthesis;
 
     try {
       for await (const audioChunk of this._tts.synthesize(text, {
         sampleRate: this._sampleRate,
+        signal: synthesis.signal,
       })) {
-        if (!this._running || !this._speaking) break;
+        if (synthesis.signal.aborted) break;
         // Resample TTS output → 8kHz → ulaw, send in 160B frames
         const pcm8k = resamplePcm16(audioChunk, this._sampleRate, 8000);
         const ulaw = pcm16ToUlaw(pcm8k);
@@ -414,9 +441,9 @@ export class PipelineSession implements Session {
         }
       }
     } catch (err) {
-      this._log.error({ err }, 'TTS error');
+      if (!synthesis.signal.aborted) this._log.error({ err }, 'TTS error');
     } finally {
-      this._speaking = false;
+      if (this._activeSynthesis === synthesis) this._activeSynthesis = null;
     }
   }
 }
