@@ -51,6 +51,7 @@ STT → LLM → TTS를 개별 조합하는 방식입니다. `PipelineSession`에
 | 제공자     | 클래스          | 프로토콜           | Sample Rate  | 환경변수             | Python | Node |  상태   | 검증일 |
 | ---------- | --------------- | ------------------ | ------------ | -------------------- | :----: | :--: | :-----: | ------ |
 | ElevenLabs | `ElevenLabsTTS` | WebSocket 스트리밍 | 24kHz (기본) | `ELEVENLABS_API_KEY` |   —    |  —   | 검증 전 | —      |
+| Typecast   | `TypecastTTS`   | HTTP 스트리밍      | 32kHz (원본) | `TYPECAST_API_KEY`   |   ✅   |  ✅  | **검증 완료** | 2026-11-19 |
 
 ## 설치
 
@@ -64,6 +65,7 @@ GOOGLE_API_KEY=AI...                 # Gemini Realtime / LLM
 ANTHROPIC_API_KEY=sk-ant-...         # Anthropic LLM
 DEEPGRAM_API_KEY=...                 # Deepgram STT
 ELEVENLABS_API_KEY=...               # ElevenLabs TTS
+TYPECAST_API_KEY=...                 # Typecast TTS
 MISTRAL_API_KEY=...                  # Mistral LLM
 GROQ_API_KEY=gsk_...                 # Groq LLM
 PERPLEXITY_API_KEY=pplx-...          # Perplexity LLM
@@ -81,7 +83,7 @@ XAI_API_KEY=xai-...                  # xAI LLM
 | **지연**         |       낮음        |       낮음       |          중간           |
 | **Barge-in**     |     내장 VAD      |     내장 VAD     |      Deepgram VAD       |
 | **LLM 선택**     |    OpenAI 전용    |   Gemini 전용    |  11개 제공자 자유 선택  |
-| **음성 선택**    |    OpenAI 음성    |   Google 음성    | ElevenLabs 등 자유 선택 |
+| **음성 선택**    |    OpenAI 음성    |   Google 음성    | ElevenLabs·Typecast 등 |
 | **Tool Calling** |        ✅         |        —         |            —            |
 | **비용**         | Realtime API 요금 | Gemini API 요금  |   각 제공자 개별 요금   |
 | **상태**         |   **검증 완료**   |     검증 전      |         검증 전         |
