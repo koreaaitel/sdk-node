@@ -68,6 +68,7 @@ agent.onIncoming(async (call) => {
 | `fromNumber` | `string` | 발신 번호 |
 | `toNumber` | `string` | 수신 번호 |
 | `callerIdRestricted` | `boolean` | 발신자가 번호 표시제한을 걸고 건 통화면 `true` (위 `CallSession` 과 같은 값) |
+| `forwardedFrom` | `string \| null` | 착신전환으로 들어온 통화에서 발신자가 원래 건 번호. 착신전환을 실행한 통신사가 전환 정보를 함께 보내온 경우에만 값이 있고, 직접 걸려온 통화는 `null` (0.53.0부터) |
 | `reject(opts?)` | `Promise<void>` | 통화를 거절합니다. `reason` 은 `'rejected'`(기본) 또는 `'busy'` |
 | `transfer(to, opts?)` | `Promise<void>` | AI 없이 받아서 `to` 로 넘깁니다. 아래 절 참고 |
 
