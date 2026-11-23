@@ -61,6 +61,8 @@ export type {
   TransferLeg,
   CallContextParam,
   CallCreateParams,
+  NumberlessCallCreateParams,
+  OutboundCallerIdMode,
   CallListParams,
   CallUpdateParams,
   Message,

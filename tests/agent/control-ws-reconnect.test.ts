@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { WebSocketServer, type WebSocket as WsType } from 'ws';
 import { ControlWebSocket, CLOSE_REPLACED, CLOSE_OWNERSHIP_LOST } from '../../src/agent/control-ws.js';
@@ -130,6 +130,41 @@ describe('ControlWebSocket reconnection policy', () => {
     await settle(1800);
 
     expect(harness.accepted.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('waits for registration on each numberless SDK connection', async () => {
+    harness = await startServer();
+    client = connect(harness, { number: undefined, sdkAgentId: 'outbound-agent' });
+    await client.connect();
+
+    const registered = vi.fn();
+    const firstWait = client.waitConnected().then(registered);
+    await expect.poll(() => harness?.accepted.length).toBe(1);
+    await settle(20);
+    expect(registered).not.toHaveBeenCalled();
+    harness.accepted[0]!.send(JSON.stringify({ event: 'agent.ready' }));
+    await firstWait;
+    expect(registered).toHaveBeenCalledOnce();
+
+    harness.accepted[0]!.close(1001, 'gateway draining');
+    await expect.poll(() => harness?.accepted.length, { timeout: 2500 }).toBe(2);
+    const reregistered = vi.fn();
+    const secondWait = client.waitConnected().then(reregistered);
+    await settle(20);
+    expect(reregistered).not.toHaveBeenCalled();
+    harness.accepted[1]!.send(JSON.stringify({ event: 'agent.ready' }));
+    await secondWait;
+    expect(reregistered).toHaveBeenCalledOnce();
+  });
+
+  it('unblocks a numberless SDK wait when the socket is closed before registration', async () => {
+    harness = await startServer();
+    client = connect(harness, { number: undefined, sdkAgentId: 'outbound-agent' });
+    await client.connect();
+    await expect.poll(() => harness?.accepted.length).toBe(1);
+    const waiting = expect(client.waitConnected()).rejects.toThrow('Control connection closed.');
+    client.close();
+    await waiting;
   });
 });
 

@@ -22,6 +22,13 @@ describe('ClawOpsAgent', () => {
     expect(agent).toBeDefined();
   });
 
+  it('rejects malformed identifiers for numberless agents', () => {
+    const base = { session: mockSession };
+    expect(() => new ClawOpsAgent({ ...base, sdkAgentId: '' })).toThrow(/sdkAgentId/);
+    expect(() => new ClawOpsAgent({ ...base, sdkAgentId: 'agent with spaces' })).toThrow(/sdkAgentId/);
+    expect(() => new ClawOpsAgent({ ...base, sdkAgentId: 'agent\n' })).toThrow(/sdkAgentId/);
+  });
+
   it('accepts rxGain and txGain', () => {
     const agent = new ClawOpsAgent({
       apiKey: 'sk_test',
@@ -141,6 +148,64 @@ describe('ClawOpsAgent', () => {
   });
 });
 
+describe('ClawOpsAgent — shared 010', () => {
+  const base = {
+    apiKey: 'sk_test',
+    accountId: 'AC123',
+    session: mockSession,
+    prewarmEnabled: false,
+  };
+  const to = '01099998888';
+  const presentedFrom = '01055551234';
+
+  it('keeps the configured From when a number-linked agent chooses shared 010', async () => {
+    const agent = new ClawOpsAgent({ ...base, from: '07012341234' });
+    vi.spyOn(agent, 'connect').mockResolvedValue(undefined);
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ callId: 'CA1', from: '07012341234', presentedFrom }), { status: 201 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const call = await agent.call(to, { callerIdMode: 'shared-010' });
+      expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)).toEqual({
+        To: to, From: '07012341234', CallerIdMode: 'shared-010', Timeout: 60,
+      });
+      expect(call.fromNumber).toBe('07012341234');
+      expect(call.presentedFrom).toBe(presentedFrom);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('automatically chooses shared 010 and reuses an early outbound-ready session', async () => {
+    const agent = new ClawOpsAgent({ ...base, sdkAgentId: 'outbound-agent' });
+    vi.spyOn(agent, 'connect').mockResolvedValue(undefined);
+    const internal = agent as unknown as {
+      _activeSessions: Map<string, CallSession>;
+      _handleOutboundReady: (event: Record<string, unknown>) => void;
+    };
+    let earlySession: CallSession | undefined;
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => {
+      internal._handleOutboundReady({ event: 'call.outbound_ready', callId: 'CA2', from: presentedFrom, presentedFrom, to });
+      earlySession = internal._activeSessions.get('CA2');
+      return new Response(JSON.stringify({ callId: 'CA2', from: presentedFrom, presentedFrom }), { status: 201 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const call = await agent.call(to);
+      expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)).toEqual({
+        To: to, SdkAgentId: 'outbound-agent', CallerIdMode: 'shared-010', Timeout: 60,
+      });
+      expect(earlySession).toBeDefined();
+      expect(call).toBe(earlySession);
+      expect(call.fromNumber).toBe(presentedFrom);
+      expect(call.presentedFrom).toBe(presentedFrom);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe('ClawOpsAgent machineDetection', () => {
   const base = {
     apiKey: 'sk_test',
@@ -187,7 +252,7 @@ describe('ClawOpsAgent machineDetection', () => {
     } finally {
       vi.unstubAllGlobals();
     }
-    expect(postedBody(fetchMock)).not.toHaveProperty('MachineDetection');
+    expect(postedBody(fetchMock)).toEqual({ To: '07099998888', From: '07012341234', Timeout: 60 });
   });
 
   it('applies instance default to originate body', async () => {

@@ -20,7 +20,12 @@ import { clearStaleReadyMarker } from './deploy-checks.js';
 clearStaleReadyMarker();
 
 export { ClawOpsAgent } from './agent.js';
-export type { ClawOpsAgentOptions, AgentEventType, ToolConfig } from './agent.js';
+export type {
+  ClawOpsAgentOptions,
+  NumberlessClawOpsAgentOptions,
+  AgentEventType,
+  ToolConfig,
+} from './agent.js';
 
 // Session
 export { CallSession, DtmfCollectorBusyError } from './session.js';

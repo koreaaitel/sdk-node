@@ -178,6 +178,8 @@ const client = new ClawOps({
 
 ### 통화 (Calls)
 
+공용 010 발신이 활성화된 계정에서 보유 번호 없이 전화를 걸려면 `callerIdMode: 'shared-010'`을 지정하고, 통화를 처리할 에이전트나 콜 플로우 또는 VoiceML URL을 전달합니다. 자체 호스팅 SDK 에이전트의 연결과 발신 예제는 [공용 010 발신](docs/agent/quickstart.md#보유-번호-없이-공용-010으로-발신)을 참고하세요.
+
 ```typescript
 // 발신 전화 생성
 const call = await client.calls.create({

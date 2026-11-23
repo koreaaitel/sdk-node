@@ -7,6 +7,8 @@ export { CallSchema, CallControlResponseSchema, TransferLegSchema } from './call
 export type {
   CallContextParam,
   CallCreateParams,
+  NumberlessCallCreateParams,
+  OutboundCallerIdMode,
   CallListParams,
   CallUpdateParams,
 } from './call-params.js';

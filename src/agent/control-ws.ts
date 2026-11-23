@@ -14,6 +14,8 @@ export interface ControlWsOptions {
   accountId: string;
   /** Phone number to register on. */
   number?: string;
+  /** Account-scoped identifier for an outbound-only SDK connection. */
+  sdkAgentId?: string;
   /**
    * Called when the server closes the connection with a code that means "do not reconnect"
    * (the number was handed to another process, or is no longer owned by this account).
@@ -47,6 +49,8 @@ const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
 /** Server sends ping every 30s; if no ping arrives within this window, assume dead. */
 const PING_TIMEOUT = 60000;
+const SDK_AGENT_REGISTRATION_TIMEOUT_MS = 5_000;
+const SDK_AGENT_CONNECT_TIMEOUT_MS = 15_000;
 
 /** Another process took over this number's control connection (zero-downtime deploy). */
 export const CLOSE_REPLACED = 4409;
@@ -94,7 +98,8 @@ const TRANSFER_LATE_ARRIVAL_GRACE_MS = 2_000;
 /** Same wording as the Python SDK. */
 const TRANSFER_NO_CONNECTION_MESSAGE = 'transfer 불가: control 연결이 끊겨 있다(재연결 중이거나 연결이 종료됐다)';
 
-function rejectionMessage(status: number, code: string | null, accountId: string, number?: string): string {
+function rejectionMessage(status: number, code: string | null, options: ControlWsOptions): string {
+  const { accountId, number, sdkAgentId } = options;
   switch (code) {
     case 'api_key_invalid':
       return (
@@ -109,21 +114,28 @@ function rejectionMessage(status: number, code: string | null, accountId: string
         '(released, reclaimed, or another account\'s). Check the number in the console.'
       );
     case 'number_missing':
+      if (sdkAgentId) {
+        return 'The server expects a phone number. Check whether it supports numberless SDK agents.';
+      }
       return 'No number was sent. Set the from option.';
     default:
-      return `The server refused the connection (HTTP ${status}). Check the API key and the number (${number ?? '(none)'}).`;
+      return sdkAgentId
+        ? `The server refused the connection (HTTP ${status}). Check the API key and SDK agent ID (${sdkAgentId}).`
+        : `The server refused the connection (HTTP ${status}). Check the API key and the number (${number ?? '(none)'}).`;
   }
 }
 
 /**
  * Build the full control WebSocket URL from options.
- * Matches Python SDK: /v1/accounts/{account_id}/agent/listen?number={number}
+ * The account endpoint accepts either a phone number or an SDK agent ID.
  */
 export function buildControlWsUrl(options: ControlWsOptions, role?: string): string {
   const scheme = options.baseUrl.startsWith('https') ? 'wss' : 'ws';
   const host = options.baseUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
   let url = `${scheme}://${host}/v1/accounts/${encodeURIComponent(options.accountId)}/agent/listen`;
-  if (options.number) {
+  if (options.sdkAgentId) {
+    url += `?sdkAgentId=${encodeURIComponent(options.sdkAgentId)}`;
+  } else if (options.number) {
     url += `?number=${encodeURIComponent(options.number)}`;
   }
   // role=retiring — "I am already stepping down; do not give me the slot."
@@ -131,7 +143,7 @@ export function buildControlWsUrl(options: ControlWsOptions, role?: string): str
   // Not reconnecting at all is the first defence, but a path may remain that reconnects anyway
   // (a lower-level retry). Without this flag such a reconnect evicts a successor that never
   // received SIGTERM — the very ping-pong the lame duck exists to prevent.
-  if (role && options.number) {
+  if (role && (options.number || options.sdkAgentId)) {
     url += `&role=${encodeURIComponent(role)}`;
   }
   return url;
@@ -156,7 +168,7 @@ export class ControlWebSocket {
   private _closed = false;
   private _connectedResolve: (() => void) | null = null;
   private _connectedReject: ((err: Error) => void) | null = null;
-  private _connectedPromise: Promise<void>;
+  private _connectedPromise!: Promise<void>;
   private _rejected: AgentAuthRejectedError | null = null;
   private _log: Logger = NOOP_LOGGER;
   private _pingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -171,6 +183,10 @@ export class ControlWebSocket {
 
   constructor(private readonly _options: ControlWsOptions) {
     this._url = buildControlWsUrl(_options);
+    this._beginConnectionWait();
+  }
+
+  private _beginConnectionWait(): void {
     this._connectedPromise = new Promise<void>((resolve, reject) => {
       this._connectedResolve = resolve;
       this._connectedReject = reject;
@@ -178,6 +194,13 @@ export class ControlWebSocket {
     // A rejection nobody awaits must not become an unhandled rejection (which kills the process
     // on Node's default settings). waitConnected() still returns the original promise.
     this._connectedPromise.catch(() => {});
+  }
+
+  private _settleConnectionWait(error?: Error): void {
+    if (error) this._connectedReject?.(error);
+    else this._connectedResolve?.();
+    this._connectedResolve = null;
+    this._connectedReject = null;
   }
 
   /** Stop reconnecting for good — this process is stepping down. Not reversible. */
@@ -215,7 +238,19 @@ export class ControlWebSocket {
    * before, it never settled and the reconnect loop ran on in the background.
    */
   async waitConnected(): Promise<void> {
-    return this._connectedPromise;
+    if (!this._options.sdkAgentId || !this._connectedResolve) return this._connectedPromise;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new AgentConnectionError('Timed out waiting for the SDK agent to register.')),
+        SDK_AGENT_CONNECT_TIMEOUT_MS,
+      );
+    });
+    try {
+      return await Promise.race([this._connectedPromise, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** The refusal that stopped this connection, if any. */
@@ -343,6 +378,10 @@ export class ControlWebSocket {
 
   /** Close the WebSocket and stop reconnecting. */
   close(): void {
+    if (!this._closed && this._options.sdkAgentId) {
+      if (!this._connectedResolve) this._beginConnectionWait();
+      this._settleConnectionWait(new AgentConnectionError('Control connection closed.'));
+    }
     this._closed = true;
     this._clearPingTimer();
     this._fireConnectionLost();
@@ -360,6 +399,7 @@ export class ControlWebSocket {
 
   private async _doConnect(): Promise<void> {
     const { WebSocket } = await import('ws');
+    if (this._closed) return;
 
     const ws = new WebSocket(this._url, {
       followRedirects: true,
@@ -368,6 +408,8 @@ export class ControlWebSocket {
       },
     });
     this._ws = ws;
+    const waitsForRegistration = this._options.sdkAgentId !== undefined;
+    let registrationTimer: ReturnType<typeof setTimeout> | undefined;
 
     // Without this listener ws turns any non-101 answer into a generic error + close(1006), so a
     // revoked key looked exactly like a network blip and was retried forever. With it, ws leaves
@@ -379,7 +421,7 @@ export class ControlWebSocket {
       res.resume();
       if (REJECTED_HANDSHAKE_STATUSES.has(status)) {
         const err = new AgentAuthRejectedError(
-          rejectionMessage(status, code, this._options.accountId, this._options.number),
+          rejectionMessage(status, code, this._options),
           { status, code },
         );
         // Stop for good before terminate(): the close it emits must not schedule a reconnect.
@@ -391,9 +433,7 @@ export class ControlWebSocket {
           code ?? '-',
           err.message,
         );
-        this._connectedReject?.(err);
-        this._connectedResolve = null;
-        this._connectedReject = null;
+        this._settleConnectionWait(err);
         try {
           this._options.onRejected?.(err);
         } catch (cbErr) {
@@ -406,12 +446,16 @@ export class ControlWebSocket {
     });
 
     ws.on('open', () => {
-      this._reconnectDelay = INITIAL_RECONNECT_DELAY;
       this._resetPingTimer();
-      if (this._connectedResolve) {
-        this._connectedResolve();
-        this._connectedResolve = null;
-        this._connectedReject = null;
+      if (waitsForRegistration) {
+        registrationTimer = setTimeout(() => {
+          this._log.warn('Control WS did not confirm SDK agent registration');
+          ws.terminate();
+        }, SDK_AGENT_REGISTRATION_TIMEOUT_MS);
+        registrationTimer.unref?.();
+      } else {
+        this._reconnectDelay = INITIAL_RECONNECT_DELAY;
+        this._settleConnectionWait();
       }
       this._log.info('Control WS connected: %s', this._url);
     });
@@ -423,6 +467,12 @@ export class ControlWebSocket {
     ws.on('message', (data: Buffer | string) => {
       try {
         const msg = JSON.parse(data.toString()) as ControlEvent;
+        if (waitsForRegistration && msg.event === 'agent.ready') {
+          clearTimeout(registrationTimer);
+          this._reconnectDelay = INITIAL_RECONNECT_DELAY;
+          this._settleConnectionWait();
+          return;
+        }
         this._dispatchEvent(msg);
       } catch {
         this._log.warn('Control WS parse error');
@@ -430,14 +480,20 @@ export class ControlWebSocket {
     });
 
     ws.on('close', (code: number, reason: Buffer | string) => {
+      clearTimeout(registrationTimer);
       this._clearPingTimer();
       this._fireConnectionLost();
       if (this._closed) return;
+      // Every new SDK connection must be registered before it accepts another outbound call.
+      if (waitsForRegistration && !this._connectedResolve) this._beginConnectionWait();
 
       if (NON_RETRYABLE_CLOSE_CODES.has(code)) {
         const text = reason?.toString() || '';
         // Stop for good. _closed also stops any reconnect already in flight.
         this._closed = true;
+        if (waitsForRegistration) {
+          this._settleConnectionWait(new AgentConnectionError('The SDK agent connection was closed by the server.'));
+        }
         this._log.info(
           'Control WS closed by server (%d %s) — not reconnecting: this number is now served elsewhere',
           code,
@@ -515,6 +571,9 @@ export class ControlWebSocket {
     if (this._lameDuck) {
       this._log.info('Control WS closed — stepping down, not reconnecting');
       this._closed = true;
+      if (this._options.sdkAgentId) {
+        this._settleConnectionWait(new AgentConnectionError('The SDK agent connection is stepping down.'));
+      }
       return;
     }
     const delay = this._reconnectDelay;

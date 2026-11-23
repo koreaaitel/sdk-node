@@ -13,6 +13,9 @@ export interface CallContextParam {
   variables?: Record<string, string | number | boolean>;
 }
 
+/** 최초 발신에서 사용할 발신번호 선택 방식. */
+export type OutboundCallerIdMode = 'shared-010';
+
 /**
  * 발신 전화 생성 요청 파라미터.
  *
@@ -28,6 +31,9 @@ export interface CallContextParam {
 export interface CallCreateParams {
   to: string;
   from: string;
+  /** 발신할 때 서버가 공용 010 회선을 선택합니다. */
+  callerIdMode?: OutboundCallerIdMode;
+  sdkAgentId?: never;
   /** VoiceML 명령을 반환할 URL. `agentId`·`callFlowId` 와 배타. */
   url?: string;
   /** 콘솔에서 만든 매니지드 에이전트 ID. `url`·`callFlowId` 와 배타. */
@@ -53,6 +59,23 @@ export interface CallCreateParams {
    */
   machineDetection?: 'Enable' | 'Hangup';
 }
+
+/**
+ * 보유 번호 없이 공용 010으로 발신합니다. 통화를 처리할 대상 하나를 지정합니다.
+ * `sdkAgentId` 는 같은 계정에서 번호 없이 연결된 SDK 에이전트의 ID입니다.
+ */
+export type NumberlessCallCreateParams = Omit<
+  CallCreateParams,
+  'from' | 'callerIdMode' | 'url' | 'agentId' | 'callFlowId' | 'sdkAgentId'
+> & {
+  from?: never;
+  callerIdMode: OutboundCallerIdMode;
+} & (
+  | { url: string; agentId?: never; callFlowId?: never; sdkAgentId?: never }
+  | { url?: never; agentId: string; callFlowId?: never; sdkAgentId?: never }
+  | { url?: never; agentId?: never; callFlowId: string; sdkAgentId?: never }
+  | { url?: never; agentId?: never; callFlowId?: never; sdkAgentId: string }
+);
 
 export interface CallListParams {
   status?: 'queued' | 'ringing' | 'in-progress' | 'completed' | 'failed';

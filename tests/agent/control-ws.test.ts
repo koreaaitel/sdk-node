@@ -40,6 +40,18 @@ describe('buildControlWsUrl', () => {
     expect(url).toContain('?number=07012345678');
   });
 
+  it('registers an SDK agent ID without passing a phone number', () => {
+    const url = buildControlWsUrl({
+      baseUrl: 'https://api.claw-ops.com',
+      apiKey: 'key123',
+      accountId: 'AC123',
+      sdkAgentId: 'outbound-agent',
+    }, 'retiring');
+    expect(url).toBe(
+      'wss://api.claw-ops.com/v1/accounts/AC123/agent/listen?sdkAgentId=outbound-agent&role=retiring',
+    );
+  });
+
   it('URL-encodes accountId and number', () => {
     const url = buildControlWsUrl({
       baseUrl: 'https://api.claw-ops.com',

@@ -7,6 +7,7 @@ import type {
   CallContextParam,
   CallCreateParams,
   CallListParams,
+  NumberlessCallCreateParams,
 } from '../types/call-params.js';
 import {
   TranscriptStatusSchema,
@@ -34,7 +35,7 @@ function callContextBody(
 
 export class Calls extends APIResource {
   async create(
-    params: CallCreateParams,
+    params: CallCreateParams | NumberlessCallCreateParams,
     options: {
       extraHeaders?: Record<string, string>;
       extraQuery?: Record<string, unknown>;
@@ -44,6 +45,8 @@ export class Calls extends APIResource {
     const body = stripNotGiven({
       To: params.to,
       From: params.from,
+      CallerIdMode: params.callerIdMode,
+      SdkAgentId: params.sdkAgentId,
       Url: params.url,
       AgentId: params.agentId,
       CallContext: callContextBody(params.callContext),
@@ -58,6 +61,9 @@ export class Calls extends APIResource {
       body,
       castTo: CallSchema,
       ...options,
+      // A lost response may hide an accepted call. Without a public idempotency key,
+      // repeating a shared-010 request can ring the recipient from another SIM.
+      ...(params.callerIdMode === 'shared-010' ? { maxRetries: 0 } : {}),
     });
   }
 
