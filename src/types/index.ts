@@ -7,7 +7,9 @@ export { CallSchema, CallControlResponseSchema, TransferLegSchema } from './call
 export type {
   CallContextParam,
   CallCreateParams,
+  CallCreateRequest,
   NumberlessCallCreateParams,
+  Shared010CallCreateParams,
   OutboundCallerIdMode,
   CallListParams,
   CallUpdateParams,

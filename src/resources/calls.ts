@@ -5,9 +5,8 @@ import { CallSchema, CallControlResponseSchema } from '../types/call.js';
 import type { Call, CallControlResponse } from '../types/call.js';
 import type {
   CallContextParam,
-  CallCreateParams,
+  CallCreateRequest,
   CallListParams,
-  NumberlessCallCreateParams,
 } from '../types/call-params.js';
 import {
   TranscriptStatusSchema,
@@ -35,7 +34,7 @@ function callContextBody(
 
 export class Calls extends APIResource {
   async create(
-    params: CallCreateParams | NumberlessCallCreateParams,
+    params: CallCreateRequest,
     options: {
       extraHeaders?: Record<string, string>;
       extraQuery?: Record<string, unknown>;
