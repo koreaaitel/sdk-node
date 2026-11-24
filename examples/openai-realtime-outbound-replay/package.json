@@ -1,0 +1,12 @@
+{
+  "name": "koreaaitel-openai-realtime-outbound-replay",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": "^22.15.0 || >=24"
+  },
+  "dependencies": {
+    "@koreaaitel/sdk": "0.63.0",
+    "ws": "8.18.3"
+  }
+}

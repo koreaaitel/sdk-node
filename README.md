@@ -49,6 +49,8 @@ agent.on('call_start', async (call) => {
 await agent.serve(); // Ctrl+C로 종료
 ```
 
+[OpenAI Realtime 발신 미디어 재현](examples/openai-realtime-outbound-replay/)을 실행하면 API 키 없이 발신 접수와 양방향 PCMU 음성, 통화 종료를 확인할 수 있습니다.
+
 ### Outbound 발신 Prewarm (낮은 첫 음성 latency)
 
 outbound 통화에서 상대 응답 직후 첫 음성까지의 지연을 줄이기 위해, `ClawOpsAgent` 는
