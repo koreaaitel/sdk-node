@@ -100,6 +100,24 @@ describe('Calls resource', () => {
       expect(call.presentedFrom).toBe(from);
     });
 
+    it('sends an optional Idempotency-Key as a structured-field string and keeps other headers', async () => {
+      const fetchFn = vi.fn<typeof fetch>().mockImplementation(async () =>
+        new Response(JSON.stringify(sampleCall), { status: 201, headers: { 'Content-Type': 'application/json' } }));
+      const client = createClient(fetchFn);
+      await client.calls.create(
+        { to: '01099998888', sdkAgentId: 'outbound-agent', callerIdMode: 'shared-010' },
+        { idempotencyKey: '8e03978e-40d5-43e8-bc93-6894a57f9324', extraHeaders: { 'X-Trace': 't1' } },
+      );
+      const headers = new Headers(fetchFn.mock.calls[0][1]!.headers as HeadersInit);
+      expect(headers.get('Idempotency-Key')).toBe('"8e03978e-40d5-43e8-bc93-6894a57f9324"');
+      expect(headers.get('X-Trace')).toBe('t1');
+
+      fetchFn.mockClear();
+      await client.calls.create({ to: '01099998888', from: '07012341234' });
+      const plain = new Headers(fetchFn.mock.calls[0][1]!.headers as HeadersInit);
+      expect(plain.get('Idempotency-Key')).toBeNull();
+    });
+
     it('does not retry shared-010 creation if the network drops the response', async () => {
       const fetchFn = vi.fn<typeof fetch>().mockRejectedValue(new TypeError('network error'));
       const client = createClient(fetchFn, 2);
