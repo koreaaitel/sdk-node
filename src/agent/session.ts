@@ -112,6 +112,8 @@ export function buildTransferPayload(to: string, options?: TransferOptions): Rec
 export class CallSession {
   readonly callId: string;
   readonly fromNumber: string;
+  /** 서버가 공용 010 발신에 사용한 실제 전화번호. */
+  readonly presentedFrom?: string;
   readonly toNumber: string;
   readonly accountId: string;
   readonly direction: CallDirection;
@@ -176,6 +178,7 @@ export class CallSession {
   constructor(options: {
     callId: string;
     fromNumber: string;
+    presentedFrom?: string;
     toNumber: string;
     accountId: string;
     direction: CallDirection;
@@ -185,6 +188,7 @@ export class CallSession {
   }) {
     this.callId = options.callId;
     this.fromNumber = options.fromNumber;
+    if (options.presentedFrom !== undefined) this.presentedFrom = options.presentedFrom;
     this.toNumber = options.toNumber;
     this.accountId = options.accountId;
     this.direction = options.direction;

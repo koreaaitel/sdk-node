@@ -4,6 +4,7 @@
 
 import { DEFAULT_BASE_URL } from '../constants.js';
 import { AgentAuthRejectedError, AgentConnectionError, AgentError } from '../error.js';
+import type { OutboundCallerIdMode } from '../types/call-params.js';
 import { applyUlawGain, ulawToPcm16 } from './audio.js';
 import { CLOSE_REPLACED, ControlWebSocket } from './control-ws.js';
 import {
@@ -163,8 +164,9 @@ export interface ClawOpsAgentOptions {
   accountId?: string;
   /** API base URL. */
   baseUrl?: string;
-  /** Phone number to send/receive calls from. Required. */
+  /** Phone number to send/receive calls from. */
   from: string;
+  sdkAgentId?: never;
   /** Session implementation (OpenAIRealtime, GeminiRealtime, PipelineSession, etc.). */
   session: Session;
   /** Enable call recording. */
@@ -231,11 +233,22 @@ export interface ClawOpsAgentOptions {
   machineDetection?: 'Enable' | 'Hangup';
 }
 
+/**
+ * Account-scoped SDK connection for outbound calls using shared 010.
+ * Reuse the same identifier across restarts.
+ */
+export interface NumberlessClawOpsAgentOptions extends Omit<ClawOpsAgentOptions, 'from' | 'sdkAgentId'> {
+  from?: never;
+  /** 1–64 ASCII letters, digits, hyphens or underscores, starting with a letter or digit. */
+  sdkAgentId: string;
+}
+
 export class ClawOpsAgent {
   private _apiKey: string;
   private _accountId: string;
   private _baseUrl: string;
   private _fromNumber: string;
+  private _sdkAgentId?: string;
   private _session: Session;
   private _tools: ToolRegistry = new ToolRegistry();
   private _handlers: Map<string, AgentEventHandler[]> = new Map();
@@ -292,11 +305,25 @@ export class ClawOpsAgent {
   /** 모든 발신에 적용되는 AMD default. call() 인자로 호출별 override 가능. */
   private _machineDetection?: 'Enable' | 'Hangup';
 
-  constructor(options: ClawOpsAgentOptions) {
+  constructor(options: ClawOpsAgentOptions | NumberlessClawOpsAgentOptions) {
     this._apiKey = options.apiKey ?? process.env['CLAWOPS_API_KEY'] ?? '';
     this._accountId = options.accountId ?? process.env['CLAWOPS_ACCOUNT_ID'] ?? '';
     this._baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
-    this._fromNumber = options.from;
+    this._fromNumber = options.from ?? '';
+    this._sdkAgentId = options.sdkAgentId;
+    if (this._sdkAgentId !== undefined) {
+      if (options.from !== undefined) {
+        throw new AgentError('Set either from or sdkAgentId.');
+      }
+      if (
+        typeof this._sdkAgentId !== 'string'
+        || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(this._sdkAgentId)
+      ) {
+        throw new AgentError('sdkAgentId must start with a letter or digit and contain 1–64 ASCII letters, digits, hyphens or underscores.');
+      }
+    } else if (!this._fromNumber) {
+      throw new AgentError('Set either from or sdkAgentId.');
+    }
     this._session = options.session;
     this._recording = options.recording ?? false;
     this._recordingPath = options.recordingPath ?? './recordings';
@@ -350,6 +377,10 @@ export class ClawOpsAgent {
       throw new AgentError(`${name}=${gain} must be a finite number >= 0`);
     }
     return gain;
+  }
+
+  private get _connectionIdentity(): string {
+    return this._sdkAgentId ?? this._fromNumber;
   }
 
   /**
@@ -433,7 +464,10 @@ export class ClawOpsAgent {
    */
   async connect(): Promise<void> {
     if (this._authRejected) throw this._authRejected;
-    if (this._controlWs) return;
+    if (this._controlWs && (!this._sdkAgentId || !this._takenOver)) {
+      if (this._sdkAgentId) await this._controlWs.waitConnected();
+      return;
+    }
 
     // Deployment diagnostics — these change nothing, they only make the quiet failures loud.
     // The stale marker was already cleared in the constructor; this is idempotent and covers
@@ -456,7 +490,7 @@ export class ClawOpsAgent {
     // after a drain would otherwise reopen the connection the drain just gave up.
     if (this._takenOver) {
       throw new AgentError(
-        `${this._fromNumber} is now served by another process — reconnecting would evict it. ` +
+        `${this._connectionIdentity} is now served by another process — reconnecting would evict it. ` +
           'Start a new agent process instead of reconnecting this one.',
       );
     }
@@ -472,14 +506,16 @@ export class ClawOpsAgent {
 
     // Connect control WebSocket
     this._controlGivenUp = false;
-    this._controlWs = new ControlWebSocket({
+    const controlWs = new ControlWebSocket({
       baseUrl: this._baseUrl,
       apiKey: this._apiKey,
       accountId: this._accountId,
-      number: this._fromNumber,
+      number: this._fromNumber || undefined,
+      sdkAgentId: this._sdkAgentId,
       onTerminalClose: (info) => this._handleTakenOver(info),
       onRejected: (err) => this._handleRejected(err),
     });
+    this._controlWs = controlWs;
 
     this._controlWs.setLogger(this._log);
 
@@ -496,10 +532,10 @@ export class ClawOpsAgent {
     );
 
     try {
-      await this._controlWs.connect();
-      await this._controlWs.waitConnected();
+      await controlWs.connect();
+      await controlWs.waitConnected();
       try {
-        this._controlWs.send({ event: 'agent.hello', sdk: getSdkInfo() });
+        controlWs.send({ event: 'agent.hello', sdk: getSdkInfo() });
       } catch { /* best-effort */ }
       // This is the moment calls can be answered — only the SDK knows it, so the SDK marks it.
       // The customer's app used to have to create this file itself right here.
@@ -509,15 +545,19 @@ export class ClawOpsAgent {
       if (err instanceof AgentAuthRejectedError) {
         // Refused on the first attempt — the reconnect loop has already stopped. It never
         // connected, so leave the slot empty.
-        this._controlWs = null;
+        if (this._controlWs === controlWs) this._controlWs = null;
         throw err;
+      }
+      if (this._sdkAgentId && this._controlWs === controlWs) {
+        controlWs.close();
+        this._controlWs = null;
       }
       throw new AgentConnectionError(
         `Failed to connect to ClawOps: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
 
-    this._log.info('ClawOpsAgent connected on %s', this._fromNumber);
+    this._log.info('ClawOpsAgent connected on %s', this._connectionIdentity);
   }
 
   /**
@@ -686,7 +726,7 @@ export class ClawOpsAgent {
     this._takenOver = true;
     this._log.info(
       'Another process now serves %s (close %d) — handing over',
-      this._fromNumber,
+      this._connectionIdentity,
       info.code,
     );
     this._notReady();
@@ -710,11 +750,11 @@ export class ClawOpsAgent {
     // The slot is gone, so no new calls come here. Dropping the probe is what makes the
     // orchestrator take this instance out of rotation.
     this._notReady();
-    this._log.info('Another process now serves %s (%s) — handing over', this._fromNumber, reason);
+    this._log.info('Another process now serves %s (%s) — handing over', this._connectionIdentity, reason);
     if (!this._stopServe) {
       this._log.warn(
         'Handover with no stop signal — check that only one instance serves %s (replicas must be 1)',
-        this._fromNumber,
+        this._connectionIdentity,
       );
     }
     this._onTakenOver?.({ code: CLOSE_REPLACED, reason });
@@ -866,8 +906,9 @@ export class ClawOpsAgent {
 
   /**
    * Initiate an outbound call.
-   * Matches Python SDK: agent.call(to, { timeout, machineDetection })
+   * With `sdkAgentId`, the connection uses shared 010 automatically.
    *
+   * @param options.callerIdMode 공용 010으로 발신하려는 번호 연결 에이전트에 사용합니다.
    * @param options.machineDetection 자동응답기/음성사서함 감지(AMD).
    *   `'Enable'`=감지 후 `AnsweredBy` 통보(통화 계속), `'Hangup'`=음성사서함 감지 시 자동 종료.
    *   미지정 시 인스턴스 default(생성자의 `machineDetection`)를 따른다.
@@ -875,16 +916,28 @@ export class ClawOpsAgent {
    */
   async call(
     to: string,
-    options?: { timeout?: number; machineDetection?: 'Enable' | 'Hangup' },
+    options?: {
+      timeout?: number;
+      machineDetection?: 'Enable' | 'Hangup';
+      callerIdMode?: OutboundCallerIdMode;
+    },
   ): Promise<CallSession> {
     await this.connect();
 
     const url = `${this._baseUrl}/v1/accounts/${this._accountId}/calls`;
     const body: Record<string, unknown> = {
       To: to,
-      From: this._fromNumber,
       Timeout: options?.timeout ?? 60,
     };
+    if (this._sdkAgentId) {
+      body['SdkAgentId'] = this._sdkAgentId;
+      body['CallerIdMode'] = 'shared-010';
+    } else {
+      body['From'] = this._fromNumber;
+      if (options?.callerIdMode !== undefined) {
+        body['CallerIdMode'] = options.callerIdMode;
+      }
+    }
     const effectiveMd = options?.machineDetection ?? this._machineDetection;
     if (effectiveMd) {
       body['MachineDetection'] = effectiveMd;
@@ -905,24 +958,8 @@ export class ClawOpsAgent {
 
     const data = (await resp.json()) as Record<string, unknown>;
 
-    const callSession = new CallSession({
-      callId: data['callId'] as string,
-      fromNumber: this._fromNumber,
-      toNumber: to,
-      accountId: this._accountId,
-      direction: 'outbound',
-    });
-
-    // Register all agent-level event handlers on the session
-    for (const [evt, handlers] of this._handlers) {
-      for (const handler of handlers) {
-        callSession.on(evt, handler);
-      }
-    }
-
-    callSession.setLogger(this._log);
-    this._activeSessions.set(callSession.callId, callSession);
-    this._log.info('Outbound call initiated: %s -> %s (%s)', this._fromNumber, to, callSession.callId);
+    const callSession = this._getOutboundSession(data['callId'] as string, to, data);
+    this._log.info('Outbound call initiated: %s -> %s (%s)', callSession.fromNumber, to, callSession.callId);
 
     // originate 직후 prewarm 을 시작한다 — ring 구간(answer 이전)에 LLM 연결 +
     // greeting 생성을 흡수해 answer→first-audio latency 를 줄인다. call.ringing
@@ -940,6 +977,7 @@ export class ClawOpsAgent {
    * 선별을 거친 뒤 같은 경로로 받거나, call.reject 를 보내고 끝낸다.
    */
   private _handleIncoming(event: ControlEvent): void | Promise<void> {
+    if (this._sdkAgentId) return;
     if (!this._incomingHook) {
       this._acceptIncoming(event);
       return;
@@ -1290,30 +1328,35 @@ export class ClawOpsAgent {
     }
   }
 
+  private _getOutboundSession(callId: string, toNumber: string, data: Record<string, unknown>): CallSession {
+    // A REST-originated call may arrive here over the control socket before its HTTP response.
+    const existing = this._activeSessions.get(callId);
+    if (existing) return existing;
+
+    const presentedFrom = typeof data['presentedFrom'] === 'string' ? data['presentedFrom'] : undefined;
+    const from = typeof data['from'] === 'string' ? data['from'] : '';
+    const session = new CallSession({
+      callId,
+      fromNumber: this._fromNumber || from || presentedFrom || '',
+      presentedFrom,
+      toNumber,
+      accountId: this._accountId,
+      direction: 'outbound',
+    });
+    session.setLogger(this._log);
+    for (const [evt, handlers] of this._handlers) {
+      for (const handler of handlers) {
+        session.on(evt, handler);
+      }
+    }
+    this._activeSessions.set(callId, session);
+    return session;
+  }
+
   private _handleOutboundReady(event: ControlEvent): void {
     const callId = event['callId'] as string;
     const mediaUrl = (event['mediaUrl'] as string) ?? '';
-    let session = this._activeSessions.get(callId);
-
-    if (!session) {
-      session = new CallSession({
-        callId,
-        fromNumber: this._fromNumber,
-        toNumber: (event['to'] as string) ?? '',
-        accountId: this._accountId,
-        direction: 'outbound',
-      });
-      session.setLogger(this._log);
-
-      // Register all agent-level event handlers on the session
-      for (const [evt, handlers] of this._handlers) {
-        for (const handler of handlers) {
-          session.on(evt, handler);
-        }
-      }
-
-      this._activeSessions.set(callId, session);
-    }
+    const session = this._getOutboundSession(callId, (event['to'] as string) ?? '', event);
 
     // prewarm 은 보통 _handleRinging(ring 구간)에서 이미 시작됐다. _startPrewarm 은
     // idempotent 하므로 여기서의 호출은 ringing 이 오지 않은 경우의 fallback 으로만
@@ -1324,7 +1367,7 @@ export class ClawOpsAgent {
     }
 
     if (mediaUrl) {
-      this._log.info('Outbound call answered: %s -> %s (%s)', this._fromNumber, session.toNumber, callId);
+      this._log.info('Outbound call answered: %s -> %s (%s)', session.fromNumber, session.toNumber, callId);
       this._safeStartCallSession(session, mediaUrl, callId);
     }
   }

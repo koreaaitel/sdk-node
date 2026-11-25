@@ -5,7 +5,7 @@ import { CallSchema, CallControlResponseSchema } from '../types/call.js';
 import type { Call, CallControlResponse } from '../types/call.js';
 import type {
   CallContextParam,
-  CallCreateParams,
+  CallCreateRequest,
   CallListParams,
 } from '../types/call-params.js';
 import {
@@ -34,16 +34,25 @@ function callContextBody(
 
 export class Calls extends APIResource {
   async create(
-    params: CallCreateParams,
+    params: CallCreateRequest,
     options: {
       extraHeaders?: Record<string, string>;
       extraQuery?: Record<string, unknown>;
       timeout?: number;
+      /**
+       * 선택. 같은 계정에서 같은 키로 다시 보낸 요청은 새 통화를 만들지 않고 처음 결과를 돌려받는다
+       * (`Idempotency-Key` 헤더, IETF draft-ietf-httpapi-idempotency-key-header). UUID 처럼 요청마다
+       * 고유한 값을 쓰고, 응답을 받지 못해 직접 다시 보낼 때 같은 값을 쓴다. 키는 24시간 유지된다.
+       */
+      idempotencyKey?: string;
     } = {},
   ): Promise<Call> {
+    const { idempotencyKey, ...requestOptions } = options;
     const body = stripNotGiven({
       To: params.to,
       From: params.from,
+      CallerIdMode: params.callerIdMode,
+      SdkAgentId: params.sdkAgentId,
       Url: params.url,
       AgentId: params.agentId,
       CallContext: callContextBody(params.callContext),
@@ -57,7 +66,18 @@ export class Calls extends APIResource {
     return this._client._post(`${this._basePath}/calls`, {
       body,
       castTo: CallSchema,
-      ...options,
+      ...requestOptions,
+      ...(idempotencyKey !== undefined
+        ? {
+            extraHeaders: {
+              ...requestOptions.extraHeaders,
+              'Idempotency-Key': `"${idempotencyKey}"`,
+            },
+          }
+        : {}),
+      // A lost response may hide an accepted call. Automatic retries stay off for
+      // shared-010 even with an idempotency key; callers retry deliberately.
+      ...(params.callerIdMode === 'shared-010' ? { maxRetries: 0 } : {}),
     });
   }
 

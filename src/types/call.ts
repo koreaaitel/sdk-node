@@ -77,6 +77,8 @@ export const CallSchema = z
     ]),
     to: z.string(),
     from: z.string(),
+    /** 서버가 공용 010 발신에 사용한 실제 전화번호. */
+    presentedFrom: z.string().nullable().optional(),
     direction: z.enum(['outbound', 'inbound']),
     duration: z.number().nullable().optional(),
     recordingUrl: z.string().nullable().optional(),

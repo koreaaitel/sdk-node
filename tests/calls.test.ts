@@ -1,13 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ClawOps } from '../src/client.js';
 
-function createClient(mockFetch: typeof fetch) {
+function createClient(mockFetch: typeof fetch, maxRetries = 0) {
   return new ClawOps({
     apiKey: 'sk_test',
     accountId: 'AC_test',
     fetch: mockFetch,
     baseURL: 'http://localhost:3000',
-    maxRetries: 0,
+    maxRetries,
   });
 }
 
@@ -77,6 +77,79 @@ describe('Calls resource', () => {
         From: '+15559876543',
         AgentId: 'cmagent123',
       });
+    });
+
+    it('uses shared 010 and an SDK agent ID without sending From', async () => {
+      const from = '01055551234';
+      const fetchFn = mockResponse({ ...sampleCall, from, presentedFrom: from }, 201);
+      const client = createClient(fetchFn);
+
+      const call = await client.calls.create({
+        to: '01099998888',
+        sdkAgentId: 'outbound-agent',
+        callerIdMode: 'shared-010',
+      });
+
+      const [, init] = fetchFn.mock.calls[0];
+      expect(JSON.parse(init!.body as string)).toEqual({
+        To: '01099998888',
+        SdkAgentId: 'outbound-agent',
+        CallerIdMode: 'shared-010',
+      });
+      expect(call.from).toBe(from);
+      expect(call.presentedFrom).toBe(from);
+    });
+
+    it('sends an optional Idempotency-Key as a structured-field string and keeps other headers', async () => {
+      const fetchFn = vi.fn<typeof fetch>().mockImplementation(async () =>
+        new Response(JSON.stringify(sampleCall), { status: 201, headers: { 'Content-Type': 'application/json' } }));
+      const client = createClient(fetchFn);
+      await client.calls.create(
+        { to: '01099998888', sdkAgentId: 'outbound-agent', callerIdMode: 'shared-010' },
+        { idempotencyKey: '8e03978e-40d5-43e8-bc93-6894a57f9324', extraHeaders: { 'X-Trace': 't1' } },
+      );
+      const headers = new Headers(fetchFn.mock.calls[0][1]!.headers as HeadersInit);
+      expect(headers.get('Idempotency-Key')).toBe('"8e03978e-40d5-43e8-bc93-6894a57f9324"');
+      expect(headers.get('X-Trace')).toBe('t1');
+
+      fetchFn.mockClear();
+      await client.calls.create({ to: '01099998888', from: '07012341234' });
+      const plain = new Headers(fetchFn.mock.calls[0][1]!.headers as HeadersInit);
+      expect(plain.get('Idempotency-Key')).toBeNull();
+    });
+
+    it('does not retry shared-010 creation if the network drops the response', async () => {
+      const fetchFn = vi.fn<typeof fetch>().mockRejectedValue(new TypeError('network error'));
+      const client = createClient(fetchFn, 2);
+
+      await expect(client.calls.create({
+        to: '01099998888',
+        sdkAgentId: 'outbound-agent',
+        callerIdMode: 'shared-010',
+      })).rejects.toThrow();
+
+      expect(fetchFn).toHaveBeenCalledOnce();
+    });
+
+    it('does not retry a shared-010 service error and retains retries for ordinary calls', async () => {
+      const fetchFn = mockResponse({ error: 'originate outcome uncertain' }, 503);
+      const client = createClient(fetchFn, 2);
+
+      await expect(client.calls.create({
+        to: '01099998888',
+        from: '07012341234',
+        callerIdMode: 'shared-010',
+      })).rejects.toMatchObject({ status: 503 });
+      expect(fetchFn).toHaveBeenCalledOnce();
+
+      fetchFn.mockReset();
+      fetchFn.mockResolvedValueOnce(new Response('Service unavailable', { status: 503 }));
+      fetchFn.mockResolvedValueOnce(new Response(JSON.stringify(sampleCall), { status: 201 }));
+      await expect(client.calls.create({
+        to: '01099998888',
+        from: '07012341234',
+      })).resolves.toMatchObject({ callId: sampleCall.callId });
+      expect(fetchFn).toHaveBeenCalledTimes(2);
     });
 
     it('converts callContext to PascalCase', async () => {

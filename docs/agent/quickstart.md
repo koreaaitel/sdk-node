@@ -347,6 +347,26 @@ const session2 = await agent.call('01012345678');
 | `timeout`          | `number` | `60`   | 상대방이 받지 않을 때 발신을 취소하기까지의 대기 시간 (초)                                             |
 | `machineDetection` | `string` | 없음   | 음성사서함 감지(AMD). `'Enable'`=결과만 통보(통화 계속), `'Hangup'`=사서함 감지 시 자동 종료. 결과는 통화 조회의 `answeredBy` 와 status callback 의 `AnsweredBy` 로 확인 |
 
+### 보유 번호 없이 공용 010으로 발신
+
+공용 010 발신이 활성화된 계정에서는 `sdkAgentId`로 자체 호스팅 에이전트를 연결할 수 있습니다. 같은 에이전트는 재시작 후에도 같은 ID로 연결합니다.
+
+```typescript
+import { ClawOpsAgent, OpenAIRealtime } from '@koreaaitel/sdk/agent';
+
+const agent = new ClawOpsAgent({
+  sdkAgentId: 'reservation-outbound',
+  session: new OpenAIRealtime({ systemPrompt: '예약 확인 도우미입니다.' }),
+});
+
+const session = await agent.call('01012345678');
+console.log(session.callId, session.presentedFrom);
+await session.wait();
+await agent.disconnect();
+```
+
+`sdkAgentId`로 연결한 에이전트는 발신 전용입니다. 이 연결에서 `agent.call()`을 호출하면 통화마다 서버가 실제로 사용할 010을 선택합니다. 기존 `from`으로 연결된 에이전트도 `agent.call(to, { callerIdMode: 'shared-010' })`으로 공용 010을 선택할 수 있습니다.
+
 ### 발신 결과 확인하기
 
 `await session.wait()` 는 **상대가 받지 않아도** 발신이 취소되는 시점에 리턴합니다.

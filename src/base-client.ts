@@ -98,6 +98,7 @@ export class APIClient {
       extraHeaders?: Record<string, string>;
       extraQuery?: Record<string, unknown>;
       timeout?: number;
+      maxRetries?: number;
     } = {},
   ): Promise<Response> {
     const headers = this._buildHeaders(options.extraHeaders);
@@ -118,7 +119,8 @@ export class APIClient {
     const url = `${this._baseURL}${path}${queryString ? `?${queryString}` : ''}`;
     const reqTimeout = options.timeout ?? this._timeout;
 
-    let retriesLeft = this._maxRetries;
+    const maxRetries = options.maxRetries ?? this._maxRetries;
+    let retriesLeft = maxRetries;
 
     while (true) {
       const controller = new AbortController();
@@ -137,14 +139,14 @@ export class APIClient {
         if (err instanceof DOMException && err.name === 'AbortError') {
           if (retriesLeft > 0) {
             retriesLeft--;
-            await this._sleep(this._retryDelay(this._maxRetries - retriesLeft));
+            await this._sleep(this._retryDelay(maxRetries - retriesLeft));
             continue;
           }
           throw new APITimeoutError({ method, url });
         }
         if (retriesLeft > 0) {
           retriesLeft--;
-          await this._sleep(this._retryDelay(this._maxRetries - retriesLeft));
+          await this._sleep(this._retryDelay(maxRetries - retriesLeft));
           continue;
         }
         throw new APIConnectionError({ method, url });
@@ -156,7 +158,7 @@ export class APIClient {
 
       if (retriesLeft > 0 && this._shouldRetry(response.status)) {
         retriesLeft--;
-        await this._sleep(this._retryDelay(this._maxRetries - retriesLeft));
+        await this._sleep(this._retryDelay(maxRetries - retriesLeft));
         continue;
       }
 
@@ -181,6 +183,7 @@ export class APIClient {
       extraHeaders?: Record<string, string>;
       extraQuery?: Record<string, unknown>;
       timeout?: number;
+      maxRetries?: number;
     } = {},
   ): Promise<T | null> {
     const response = await this._send(method, path, options);
@@ -236,6 +239,7 @@ export class APIClient {
       extraHeaders?: Record<string, string>;
       extraQuery?: Record<string, unknown>;
       timeout?: number;
+      maxRetries?: number;
     },
   ): Promise<T> {
     const result = await this._request<T>('POST', path, options);
